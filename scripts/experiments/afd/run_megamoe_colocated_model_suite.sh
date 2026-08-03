@@ -8,7 +8,7 @@ export BACKEND=${BACKEND:-both}
 export LAYERS=${LAYERS:-0}
 export ROUTING=${ROUTING:-balanced}
 export WEIGHT_SLOTS=${WEIGHT_SLOTS:-2}
-export WARMUPS=${WARMUPS:-5}
+export WARMUPS=${WARMUPS:-30}
 export ITERATIONS=${ITERATIONS:-30}
 
 read -r -a models <<< "${MODELS:-qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 deepseek_v4_flash_fp4 deepseek_v4_pro_fp4}"

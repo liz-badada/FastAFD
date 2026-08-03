@@ -14,7 +14,7 @@ layers=${LAYERS:-0}
 routing=${ROUTING:-balanced}
 expected_tokens_per_lane=${EXPECTED_TOKENS_PER_LANE:-}
 prefetch_mib=${PREFETCH_MIB:-0}
-warmups=${WARMUPS:-5}
+warmups=${WARMUPS:-30}
 iterations=${ITERATIONS:-30}
 
 mkdir -p "${workspace}/runtime_home" "${workspace}/cache/deepgemm-multimodel" "${results_dir}"

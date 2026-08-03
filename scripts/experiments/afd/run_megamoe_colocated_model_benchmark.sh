@@ -13,7 +13,7 @@ layers=${LAYERS:-0}
 routing=${ROUTING:-balanced}
 backend=${BACKEND:-mega}
 weight_slots=${WEIGHT_SLOTS:-2}
-warmups=${WARMUPS:-5}
+warmups=${WARMUPS:-30}
 iterations=${ITERATIONS:-30}
 
 mkdir -p \

@@ -547,7 +547,7 @@ def main() -> None:
         default=2,
         help="Number of deterministic weight sets to allocate and cycle across layers",
     )
-    parser.add_argument("--warmups", type=int, default=5)
+    parser.add_argument("--warmups", type=int, default=30)
     parser.add_argument("--iterations", type=int, default=30)
     args = parser.parse_args()
 

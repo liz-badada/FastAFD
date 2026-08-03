@@ -115,7 +115,7 @@ AG_SIZE=4 EG_SIZE=4 \
 SEQUENCES_PER_AG_RANK=96 \
 MTP_NEXTN=0 MICROBATCHES=2 \
 LAYERS=94 ROUTING=balanced \
-WARMUPS=5 ITERATIONS=30 \
+WARMUPS=30 ITERATIONS=30 \
 RESULTS_DIR=/workspace/results/megamoe-split \
 bash scripts/experiments/afd/run_megamoe_m2n_model_benchmark.sh
 ```
@@ -131,7 +131,7 @@ MODEL=qwen3_235b_fp4 \
 EP_SIZE=8 TOKENS_PER_RANK=96 \
 MTP_NEXTN=0 LAYERS=94 \
 ROUTING=balanced BACKEND=both WEIGHT_SLOTS=2 \
-WARMUPS=5 ITERATIONS=30 \
+WARMUPS=30 ITERATIONS=30 \
 RESULTS_DIR=/workspace/results/megamoe-colocated \
 bash scripts/experiments/afd/run_megamoe_colocated_model_benchmark.sh
 ```
@@ -146,7 +146,7 @@ On the configured ComputeLab B200 partition, submit either runner through:
 SOURCE_ROOT=/path/to/FastAFD \
 RUN_SCRIPT=run_megamoe_colocated_model_benchmark.sh \
 MODEL=qwen3_235b_fp4 EP_SIZE=8 TOKENS_PER_RANK=96 \
-BACKEND=both LAYERS=94 WARMUPS=5 ITERATIONS=30 \
+BACKEND=both LAYERS=94 WARMUPS=30 ITERATIONS=30 \
 RESULTS_DIR=/workspace/results/megamoe-colocated \
 sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 ```

@@ -373,7 +373,7 @@ def main() -> None:
     parser.add_argument("--expected-tokens-per-lane", type=int)
     parser.add_argument("--prefetch-mib", type=int, default=0)
     parser.add_argument("--ag-sms", type=int, default=24)
-    parser.add_argument("--warmups", type=int, default=5)
+    parser.add_argument("--warmups", type=int, default=30)
     parser.add_argument("--iterations", type=int, default=30)
     args = parser.parse_args()
 

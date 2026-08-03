@@ -5,7 +5,7 @@ runner=$(dirname "${BASH_SOURCE[0]}")/run_megamoe_m2n_model_benchmark.sh
 export RESULTS_DIR=${RESULTS_DIR:-/workspace/results/megamoe-m2n-multimodel}
 export LAYERS=${LAYERS:-0}
 export ROUTING=${ROUTING:-balanced}
-export WARMUPS=${WARMUPS:-5}
+export WARMUPS=${WARMUPS:-30}
 export ITERATIONS=${ITERATIONS:-30}
 
 read -r -a models <<< "${MODELS:-qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 deepseek_v4_flash_fp4 deepseek_v4_pro_fp4}"
