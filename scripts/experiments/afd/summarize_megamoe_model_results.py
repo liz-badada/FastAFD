@@ -153,6 +153,30 @@ def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
     ]
 
 
+def validate_unique_profile_keys(rows: list[ResultRow]) -> None:
+    seen: dict[tuple[Any, ...], str] = {}
+    for row in rows:
+        if not row.eligible:
+            continue
+        key = (
+            row.model_path,
+            row.system,
+            row.stage,
+            row.topology,
+            row.logical_batch,
+            row.mtp_nextn,
+            row.microbatches,
+            row.layers,
+            row.precision,
+        )
+        if previous := seen.get(key):
+            raise ValueError(
+                "multiple eligible results have the same exact profile key; "
+                f"select one reproducible trial: {previous}, {row.path}"
+            )
+        seen[key] = row.path
+
+
 def write_csv(path: Path, rows: list[ResultRow]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as stream:
@@ -260,6 +284,7 @@ def main() -> int:
     args = parse_args()
     rows = [row for path in result_files(args.inputs) if (row := parse_result(path)) is not None]
     rows = paired_split_eligibility(rows)
+    validate_unique_profile_keys(rows)
     write_csv(args.csv, rows)
     write_markdown(args.markdown, rows)
     write_profile(args.profile, rows)

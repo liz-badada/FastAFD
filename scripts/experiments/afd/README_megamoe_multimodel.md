@@ -92,6 +92,10 @@ expert count, routing scale, and activation contract are defined in
    | `megamoe_latency_reference.csv` | Machine-readable view of the same exact points. |
    | `afd_moe_stage_profile.json` | Validated exact-match timing input for AIC. |
 
+   When a point was rerun, pass only the selected trial. The summarizer rejects
+   duplicate eligible exact keys and reports both source paths instead of
+   emitting an AIC profile whose result depends on directory order.
+
 4. Consume the profile with the matching AIC branch. `--require-measured-moe`
    prevents a generic MoE estimate from being mixed into either comparison
    arm.
