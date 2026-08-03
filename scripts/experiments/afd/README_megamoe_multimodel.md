@@ -40,6 +40,11 @@ The exact hidden size, intermediate size, routed expert count, top-k, shared
 expert count, routing scale, and activation contract are defined in
 `python/minisgl/moe/megamoe_model_profiles.py`.
 
+Each profile records two paths when needed: `model_path` identifies the
+measured checkpoint/weight contract, while `simulation_model_path` is the exact
+model identity used by the AIC shape model. Quantization remains a separate
+exact profile key; the exporter never treats the two paths as interchangeable.
+
 ## Reproduction order
 
 1. Run the one-layer, low-batch smoke suite. This checks compilation, all-rank

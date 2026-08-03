@@ -19,6 +19,7 @@ ActivationKind = Literal["silu", "swigluoai"]
 class MegaMoEModelProfile:
     key: str
     model_path: str
+    simulation_model_path: str
     architecture: str
     num_hidden_layers: int
     num_moe_layers: int
@@ -95,6 +96,7 @@ _PROFILES = {
     "qwen3_235b_fp8": MegaMoEModelProfile(
         key="qwen3_235b_fp8",
         model_path="Qwen/Qwen3-235B-A22B-FP8",
+        simulation_model_path="Qwen/Qwen3-235B-A22B-FP8",
         architecture="Qwen3MoeForCausalLM",
         num_hidden_layers=94,
         num_moe_layers=94,
@@ -118,6 +120,7 @@ _PROFILES = {
     "minimax_m25_fp8": MegaMoEModelProfile(
         key="minimax_m25_fp8",
         model_path="MiniMaxAI/MiniMax-M2.5",
+        simulation_model_path="MiniMaxAI/MiniMax-M2.5",
         architecture="MiniMaxM2ForCausalLM",
         num_hidden_layers=62,
         num_moe_layers=62,
@@ -141,6 +144,7 @@ _PROFILES = {
     "minimax_m3_fp8": MegaMoEModelProfile(
         key="minimax_m3_fp8",
         model_path="MiniMaxAI/MiniMax-M3",
+        simulation_model_path="MiniMaxAI/MiniMax-M3",
         architecture="MiniMaxM3ForCausalLM",
         num_hidden_layers=60,
         num_moe_layers=57,
@@ -167,6 +171,7 @@ _PROFILES = {
     "deepseek_v4_flash_fp8": MegaMoEModelProfile(
         key="deepseek_v4_flash_fp8",
         model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        simulation_model_path="sgl-project/DeepSeek-V4-Flash-FP8",
         architecture="DeepseekV4ForCausalLM",
         num_hidden_layers=43,
         num_moe_layers=43,
@@ -190,6 +195,7 @@ _PROFILES = {
     "deepseek_v4_pro_fp8": MegaMoEModelProfile(
         key="deepseek_v4_pro_fp8",
         model_path="sgl-project/DeepSeek-V4-Pro-FP8",
+        simulation_model_path="sgl-project/DeepSeek-V4-Pro-FP8",
         architecture="DeepseekV4ForCausalLM",
         num_hidden_layers=61,
         num_moe_layers=61,
@@ -239,6 +245,7 @@ _PROFILES["deepseek_v4_flash_fp4"] = replace(
     _PROFILES["deepseek_v4_flash_fp4"],
     key="deepseek_v4_flash_fp4",
     model_path="deepseek-ai/DeepSeek-V4-Flash",
+    simulation_model_path="deepseek-ai/DeepSeek-V4-Flash",
     checkpoint_precision="native FP4 weights with FP8 activations",
 )
 _PROFILES["deepseek_v4_pro_fp4"] = _PROFILES["deepseek_v4_pro_fp8"].with_weight_precision("fp4")
@@ -246,6 +253,7 @@ _PROFILES["deepseek_v4_pro_fp4"] = replace(
     _PROFILES["deepseek_v4_pro_fp4"],
     key="deepseek_v4_pro_fp4",
     model_path="deepseek-ai/DeepSeek-V4-Pro",
+    simulation_model_path="deepseek-ai/DeepSeek-V4-Pro",
     checkpoint_precision="native FP4 weights with FP8 activations",
 )
 
