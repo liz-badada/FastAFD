@@ -147,9 +147,13 @@ name.
    duplicate eligible exact keys and reports both source paths instead of
    emitting an AIC profile whose result depends on directory order.
 
-4. Consume the profile with the matching AIC branch. `--require-measured-moe`
-   prevents a generic MoE estimate from being mixed into either comparison
-   arm.
+4. Consume the profile with the matching AIC branch only when the profile
+   system matches the target sweep. `--require-measured-moe` prevents a
+   generic MoE estimate from being mixed into either comparison arm. The
+   committed reference is `b200_sxm`; AIC's current fixed-pool tool targets
+   `gb200`, so it rejects that reference by design. Re-run the same measurement
+   matrix on GB200 and export a profile whose entries use `system=gb200` before
+   running this exact-measured command.
 
    ```bash
    git clone --branch pr1323-afd-moe-eval \
@@ -164,6 +168,22 @@ name.
      --profile-scope primary \
      --afd-moe-profile /path/to/afd_moe_stage_profile.json \
      --require-measured-moe
+   ```
+
+   To run the current generic GB200 sweep while showing the qualified B200
+   measurements only as a separate evidence table:
+
+   ```bash
+   uv run python tools/afd_multimodel_mtp_experiment.py \
+     --output /path/to/generic_gb200_sweep.json \
+     --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash deepseek_v4_pro \
+     --workloads 8k 16k --total-gpus 16 24 36 48 72 \
+     --profile-scope primary
+   uv run python tools/render_afd_multimodel_mtp_report.py \
+     --sweep /path/to/generic_gb200_sweep.json \
+     --moe-reference-profile /path/to/FastAFD/scripts/experiments/afd/reference/b200_sxm/afd_moe_stage_profile.json \
+     --moe-reference-url https://github.com/liz-badada/FastAFD/tree/megamoe-multimodel-b200/scripts/experiments/afd/reference/b200_sxm \
+     --output-dir /path/to/report --speed-floor 30
    ```
 
 5. Optionally replay selected service points with the matching Dynamo branch.
