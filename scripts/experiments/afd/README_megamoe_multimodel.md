@@ -18,13 +18,19 @@ git status --short
 git rev-parse HEAD
 ```
 
-This benchmark measures model-shaped MegaMoE stages for:
+The model registry provides split-stage contracts for:
 
 - `qwen3_235b_{fp8,fp4}`
 - `minimax_m25_{fp8,fp4}`
 - `minimax_m3_{fp8,fp4}`
 - `deepseek_v4_flash_{fp8,fp4}`
 - `deepseek_v4_pro_{fp8,fp4}`
+
+The split AFD runner supports both listed precisions. The matched colocated
+MegaMoE-versus-DeepEP+DeepGEMM runner currently supports FP8 activations with
+FP4 weights only, matching the available colocated MegaMoE kernel. Use the FP4
+profile names for an AGG/AFD same-backend comparison; do not relabel an FP4
+measurement as an FP8 result.
 
 Being listed means that the benchmark has an explicit model-shape contract. It
 does not mean that every model is already qualified for profile export; each
