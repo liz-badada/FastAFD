@@ -724,8 +724,11 @@ def main() -> None:
         del mega_reference, deepep_reference, difference
 
     output_by_backend: dict[str, torch.Tensor] = {}
-    for name in enabled_backends:
-        for _ in range(args.warmups):
+    for warmup in range(args.warmups):
+        order = (
+            enabled_backends if warmup % 2 == 0 else tuple(reversed(enabled_backends))
+        )
+        for name in order:
             dist.barrier()
             output_by_backend[name] = run_backend(name)
             torch.cuda.synchronize()
