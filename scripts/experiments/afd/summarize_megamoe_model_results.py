@@ -186,28 +186,50 @@ def parse_result(path: Path) -> ResultRow | None:
 
 
 def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
-    validated = {
-        (row.model, row.precision, row.system)
-        for row in rows
-        if row.stage == "agg" and row.eligible
-    }
-    return [
-        ResultRow(
-            **(
-                row.__dict__
-                | {
-                    "eligible": bool(
-                        row.stage == "afd"
-                        and row.stable
-                        and (row.model, row.precision, row.system) in validated
-                    )
-                    if row.stage == "afd"
-                    else row.eligible
-                }
+    def validation_key(row: ResultRow) -> tuple[Any, ...]:
+        return (
+            row.model,
+            row.precision,
+            row.system,
+            row.logical_batch,
+            row.mtp_nextn,
+            row.layers,
+        )
+
+    validated: dict[tuple[Any, ...], ResultRow] = {}
+    for row in rows:
+        if row.stage != "agg" or not row.eligible:
+            continue
+        key = validation_key(row)
+        if previous := validated.get(key):
+            raise ValueError(
+                "multiple eligible colocated results match one split validation key; "
+                f"select one reproducible trial: {previous.path}, {row.path}"
+            )
+        validated[key] = row
+
+    paired = []
+    for row in rows:
+        if row.stage != "afd":
+            paired.append(row)
+            continue
+        reference = validated.get(validation_key(row))
+        paired.append(
+            ResultRow(
+                **(
+                    row.__dict__
+                    | {
+                        "correctness": None if reference is None else reference.correctness,
+                        "speedup": None if reference is None else reference.speedup,
+                        "speedup_lower_bound": (
+                            None if reference is None else reference.speedup_lower_bound
+                        ),
+                        "eligible": bool(row.stable and reference is not None),
+                    }
+                )
             )
         )
-        for row in rows
-    ]
+    return paired
 
 
 def validate_unique_profile_keys(rows: list[ResultRow]) -> None:
@@ -278,7 +300,7 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     lines = [
         "# MegaMoE measured latency reference",
         "",
-        "Only exact measured points are listed. An AFD row is eligible only when it is stable and the same model, precision, and system has a correctness-passing colocated MegaMoE-versus-DeepEP result.",
+        "Only exact measured points are listed. An AFD row is eligible only when it is stable and has a correctness-passing colocated MegaMoE-versus-DeepEP result at the same model, precision, system, logical source-rank batch, MTP nextN, and layer count.",
         "",
         "The speedup columns compare complete colocated MoE-stage backend paths, including production quantization, dispatch/combine, expert alignment, scatter/gather, and GEMMs. They are not GEMM-only or end-to-end serving speedups. The AIC profile consumes the absolute MegaMoE latency.",
         "",

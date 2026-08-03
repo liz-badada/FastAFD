@@ -254,6 +254,11 @@ pass:
 4. The conservative same-sample speedup bound is greater than one: minimum
    observed DeepEP latency divided by maximum observed MegaMoE latency. This
    proves the gain without relying on a noisy reference mean or median.
+5. A split AFD point has a qualified colocated comparison at the same model,
+   precision, system, logical source-rank batch, MTP `nextN`, and layer count.
+   The exporter copies that comparison's correctness and conservative speedup
+   bound into the split point's validation evidence; it does not accept a
+   different workload merely because the model name matches.
 
 The JSON contains every latency sample, per-rank provenance, the source commit
 and tree hash, model contract, physical token count, routing load, correctness,
