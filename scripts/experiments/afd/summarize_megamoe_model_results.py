@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,14 @@ class ResultRow:
     eligible: bool
     source_commit: str
     source_tree_sha256: str
+    gpu_name: str
+    torch_version: str
+    cuda_runtime: str
+    driver_power_clocks_memory: str
+    container_image: str
+    slurm_partition: str
+    slurm_job_id: str
+    slurm_node: str
 
 
 def result_files(inputs: Iterable[Path]) -> list[Path]:
@@ -73,6 +82,20 @@ def parse_result(path: Path) -> ResultRow | None:
     workload = payload["workload"]
     topology = payload["topology"]
     source = payload.get("source", {})
+    provenance_rows = payload.get("provenance_by_rank") or []
+    provenance = provenance_rows[0] if provenance_rows else {}
+    environment = {
+        "gpu_name": str(provenance.get("gpu_name", "unknown")),
+        "torch_version": str(provenance.get("torch", "unknown")),
+        "cuda_runtime": str(provenance.get("cuda_runtime", "unknown")),
+        "driver_power_clocks_memory": str(
+            provenance.get("driver_power_clocks_memory", "unknown")
+        ),
+        "container_image": str(provenance.get("container_image", "unknown")),
+        "slurm_partition": str(provenance.get("slurm_partition", "unknown")),
+        "slurm_job_id": str(provenance.get("slurm_job_id", "unknown")),
+        "slurm_node": str(provenance.get("slurm_node", "unknown")),
+    }
     if schema == COLOCATED_SCHEMA:
         backends = payload["backend_results"]
         if "mega" not in backends:
@@ -122,6 +145,7 @@ def parse_result(path: Path) -> ResultRow | None:
             eligible=bool(payload.get("eligible_for_profile", False)),
             source_commit=str(source.get("commit", "")),
             source_tree_sha256=str(source.get("source_tree_sha256", "")),
+            **environment,
         )
 
     stage = payload["stage_cuda"]
@@ -157,6 +181,7 @@ def parse_result(path: Path) -> ResultRow | None:
         eligible=False,
         source_commit=str(source.get("commit", "")),
         source_tree_sha256=str(source.get("source_tree_sha256", "")),
+        **environment,
     )
 
 
@@ -277,6 +302,46 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     }
     for contract in sorted(contracts):
         lines.append("| " + " | ".join(format_value(value) for value in contract) + " |")
+    environments: dict[tuple[str, ...], dict[str, set[str]]] = defaultdict(
+        lambda: {"jobs": set(), "nodes": set(), "commits": set(), "trees": set()}
+    )
+    for row in rows:
+        key = (
+            row.system,
+            row.gpu_name,
+            row.driver_power_clocks_memory,
+            row.torch_version,
+            row.cuda_runtime,
+            row.container_image,
+            row.slurm_partition,
+        )
+        environments[key]["jobs"].add(row.slurm_job_id)
+        environments[key]["nodes"].add(row.slurm_node)
+        environments[key]["commits"].add(row.source_commit)
+        environments[key]["trees"].add(row.source_tree_sha256)
+    lines.extend(
+        [
+            "",
+            "## Measurement environments",
+            "",
+            "| system | GPU | driver / power / clocks / memory | Torch | CUDA | container | partition | jobs | nodes | source commits | source tree SHA-256 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for key, values in sorted(environments.items()):
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    *key,
+                    ", ".join(sorted(values["jobs"])),
+                    ", ".join(sorted(values["nodes"])),
+                    ", ".join(sorted(values["commits"])),
+                    ", ".join(sorted(values["trees"])),
+                ]
+            )
+            + " |"
+        )
     lines.extend(
         [
             "",
