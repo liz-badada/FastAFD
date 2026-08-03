@@ -1,5 +1,13 @@
 # Multi-model MegaMoE measurement
 
+## Companion branches
+
+| Repository | Branch | Purpose |
+| --- | --- | --- |
+| `liz-badada/FastAFD` | `megamoe-multimodel-b200` | Measure matched MegaMoE and DeepEP+DeepGEMM stages and export exact profiles. |
+| `liz-badada/aiconfigurator` | `pr1323-afd-moe-eval` | Consume exact measured profiles in matched AGG/AFD sweeps. |
+| `liz-badada/dynamo` | `afd-moe-timing` | Replay selected AIC service points with Dynamo Mocker. |
+
 Use the reproducible measurement branch:
 
 ```bash
@@ -68,6 +76,12 @@ expert count, routing scale, and activation contract are defined in
      --profile /path/to/afd_moe_stage_profile.json
    ```
 
+   | Output | Use |
+   | --- | --- |
+   | `megamoe_latency_reference.md` | Compact human-readable latency and qualification table. |
+   | `megamoe_latency_reference.csv` | Machine-readable view of the same exact points. |
+   | `afd_moe_stage_profile.json` | Validated exact-match timing input for AIC. |
+
 4. Consume the profile with the matching AIC branch. `--require-measured-moe`
    prevents a generic MoE estimate from being mixed into either comparison
    arm.
@@ -127,9 +141,9 @@ bash scripts/experiments/afd/run_megamoe_m2n_model_benchmark.sh
 
 Use the colocated path for an AGG worker. `BACKEND=both` measures MegaMoE and
 the official DeepEP normal path with SGLang scatter/gather and two contiguous
-DeepGEMM GEMMs. The paths share BF16 inputs, routes, FP4 weights, activation,
-and output scaling. Each retains its production input quantization granularity:
-block-32 for MegaMoE and block-128 for the SGLang DeepEP path.
+DeepGEMM GEMMs. The paths share BF16 inputs, routes, model-precision weights,
+activation, and output scaling. Each retains its production input quantization
+granularity: block-32 for MegaMoE and block-128 for the SGLang DeepEP path.
 
 ```bash
 MODEL=qwen3_235b_fp4 \
