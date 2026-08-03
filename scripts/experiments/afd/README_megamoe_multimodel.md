@@ -72,6 +72,10 @@ expert count, routing scale, and activation contract are defined in
    sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
    ```
 
+   Set `BACKEND_GRID="deepep both"` on the colocated suite to run the
+   reference-only and matched paths in the same allocation when auditing
+   backend-state or node-to-node stability.
+
 3. Convert raw JSON files into the review table and exact-only AIC profile.
 
    ```bash
