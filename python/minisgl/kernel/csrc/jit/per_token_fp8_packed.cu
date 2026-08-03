@@ -101,7 +101,8 @@ __device__ __forceinline__ unsigned subgroup_mask(unsigned tid) {
 // Output scale layout: stride=(1, tma_aligned_mn) int32, column-major aligned
 // (matches DeepGEMM/vLLM TMA-friendly packed-scale layout).
 // ============================================================================
-template <typename DType, int THREADS_PER_GROUP, int GROUPS_PER_BLOCK_X, int ROWS_PER_BLOCK>
+template <typename DType, int GROUP_SIZE, int THREADS_PER_GROUP,
+          int GROUPS_PER_BLOCK_X, int ROWS_PER_BLOCK>
 __global__ void per_token_cast_fp8_packed_kernel(
     const DType* __restrict__ input,
     uint8_t* __restrict__ output_q,
@@ -115,7 +116,6 @@ __global__ void per_token_cast_fp8_packed_kernel(
     float eps,
     float min_8bit,
     float max_8bit) {
-  constexpr int GROUP_SIZE = 128;
   constexpr int VEC_SIZE = GROUP_SIZE / THREADS_PER_GROUP;
   static_assert(GROUP_SIZE == THREADS_PER_GROUP * VEC_SIZE);
   static_assert(VEC_SIZE % 4 == 0);
@@ -221,7 +221,8 @@ inline int64_t div_up_i64(int64_t x, int64_t y) {
 //     blocks (~m * packed_groups), best SM utilization.
 //   - For larger problems, register-resident (8, 16/8/4, 1/2/4) ("v2 style")
 //     wins by 1.5-2x via wider per-thread LDG (2x uint4 = 32 B).
-inline LaunchConfig pick_config(int64_t mn, int64_t padded_groups_per_row) {
+inline LaunchConfig pick_config(
+    int64_t mn, int64_t padded_groups_per_row, int64_t group_size) {
   // Heuristic: empirically derived on GB200 (NSYS sweep over shapes).
   // At very small (m, n), config (32, 4, 1) ("v1 style") wins because the
   // larger thread count (32 vs 8 per group) keeps SMs busier when there are
@@ -250,6 +251,11 @@ inline LaunchConfig pick_config(int64_t mn, int64_t padded_groups_per_row) {
       " max=", kMaxGridDimY);
   const int64_t v2_blocks =
       (padded_groups_per_row / kx) * div_up_i64(mn, ry);
+  // A 32-element scale group needs TPG=8 so every lane owns four elements,
+  // the minimum vector width supported by the packed FP8 store.
+  if (group_size == 32) {
+    return {8, kx, ry};
+  }
   if (v2_blocks >= kBlocksThreshold) {
     return {8, kx, ry};
   }
@@ -268,7 +274,8 @@ struct PerTokenCastFp8PackedKernel {
   static void run(
       const tvm::ffi::TensorView x,       // (m, n) bf16 / fp16
       const tvm::ffi::TensorView y_u8,    // (m, n) uint8 (fp8 bytes)
-      const tvm::ffi::TensorView s_i32) { // (m, packed_groups) int32, strides (1, tma_aligned_mn)
+      const tvm::ffi::TensorView s_i32,   // (m, packed_groups) int32, strides (1, tma_aligned_mn)
+      int64_t group_size) {
     using namespace host;
     auto device_ = SymbolicDevice{};
     auto data_dtype_ = SymbolicDType{};
@@ -290,13 +297,14 @@ struct PerTokenCastFp8PackedKernel {
         .with_device<kDLCUDA>(device_)
         .verify(s_i32);
 
-    constexpr int GROUP_SIZE = 128;
     const auto m = m_.unwrap();
     const auto n = n_.unwrap();
     const auto pg = pg_.unwrap();
-    RuntimeCheck(n % GROUP_SIZE == 0, "n=", n,
-                 " must be divisible by GROUP_SIZE=", GROUP_SIZE);
-    const auto groups_per_row = n / GROUP_SIZE;
+    RuntimeCheck(group_size == 32 || group_size == 128,
+                 "group_size must be 32 or 128, got ", group_size);
+    RuntimeCheck(n % group_size == 0, "n=", n,
+                 " must be divisible by group_size=", group_size);
+    const auto groups_per_row = n / group_size;
     const auto k_num_packed_sfk = (groups_per_row + 3) / 4;
     const auto tma_aligned_mn = ((m + 3) / 4) * 4;
     RuntimeCheck(pg == k_num_packed_sfk,
@@ -312,10 +320,13 @@ struct PerTokenCastFp8PackedKernel {
     const auto padded_groups_per_row = k_num_packed_sfk * 4;
     const auto num_scale_elems =
         m + (k_num_packed_sfk - 1) * tma_aligned_mn;
-    const LaunchConfig cfg = pick_config(tma_aligned_mn, padded_groups_per_row);
+    const LaunchConfig cfg =
+        pick_config(tma_aligned_mn, padded_groups_per_row, group_size);
 
-    auto launch = [&](auto type_tag, auto tpg_tag, auto kx_tag, auto ry_tag) {
+    auto launch = [&](auto type_tag, auto group_tag, auto tpg_tag,
+                      auto kx_tag, auto ry_tag) {
       using DType = typename decltype(type_tag)::type;
+      constexpr int GROUP = decltype(group_tag)::value;
       constexpr int TPG = decltype(tpg_tag)::value;
       constexpr int KX = decltype(kx_tag)::value;
       constexpr int RY = decltype(ry_tag)::value;
@@ -333,7 +344,7 @@ struct PerTokenCastFp8PackedKernel {
                       static_cast<unsigned>(blocks_y));
       const dim3 block(static_cast<unsigned>(TPG * KX * RY));
       LaunchKernel(grid, block, device)(
-          per_token_cast_fp8_packed_kernel<DType, TPG, KX, RY>,
+          per_token_cast_fp8_packed_kernel<DType, GROUP, TPG, KX, RY>,
           static_cast<const DType*>(x.data_ptr()),
           static_cast<uint8_t*>(y_u8.data_ptr()),
           reinterpret_cast<uint32_t*>(s_i32.data_ptr()),
@@ -348,29 +359,29 @@ struct PerTokenCastFp8PackedKernel {
           448.0f);
     };
 
-    auto pick_kx_ry = [&](auto type_tag, auto tpg_tag) {
+    auto pick_kx_ry = [&](auto type_tag, auto group_tag, auto tpg_tag) {
       if (cfg.groups_per_block_x == 16 && cfg.rows_per_block == 1) {
-        launch(type_tag, tpg_tag,
+        launch(type_tag, group_tag, tpg_tag,
                std::integral_constant<int, 16>{},
                std::integral_constant<int, 1>{});
       } else if (cfg.groups_per_block_x == 8 && cfg.rows_per_block == 2) {
-        launch(type_tag, tpg_tag,
+        launch(type_tag, group_tag, tpg_tag,
                std::integral_constant<int, 8>{},
                std::integral_constant<int, 2>{});
       } else if (cfg.groups_per_block_x == 4 && cfg.rows_per_block == 4) {
-        launch(type_tag, tpg_tag,
+        launch(type_tag, group_tag, tpg_tag,
                std::integral_constant<int, 4>{},
                std::integral_constant<int, 4>{});
       } else if (cfg.groups_per_block_x == 2 && cfg.rows_per_block == 8) {
-        launch(type_tag, tpg_tag,
+        launch(type_tag, group_tag, tpg_tag,
                std::integral_constant<int, 2>{},
                std::integral_constant<int, 8>{});
       } else if (cfg.groups_per_block_x == 1 && cfg.rows_per_block == 16) {
-        launch(type_tag, tpg_tag,
+        launch(type_tag, group_tag, tpg_tag,
                std::integral_constant<int, 1>{},
                std::integral_constant<int, 16>{});
       } else if (cfg.groups_per_block_x == 4 && cfg.rows_per_block == 1) {
-        launch(type_tag, tpg_tag,
+        launch(type_tag, group_tag, tpg_tag,
                std::integral_constant<int, 4>{},
                std::integral_constant<int, 1>{});
       } else {
@@ -379,21 +390,37 @@ struct PerTokenCastFp8PackedKernel {
       }
     };
 
-    auto dispatch = [&](auto type_tag) {
+    auto dispatch = [&](auto type_tag, auto group_tag) {
+      constexpr int GROUP = decltype(group_tag)::value;
       if (cfg.threads_per_group == 8) {
-        pick_kx_ry(type_tag, std::integral_constant<int, 8>{});
-      } else if (cfg.threads_per_group == 32) {
-        pick_kx_ry(type_tag, std::integral_constant<int, 32>{});
+        pick_kx_ry(type_tag, group_tag, std::integral_constant<int, 8>{});
       } else {
-        RuntimeCheck(false, "unsupported THREADS_PER_GROUP=",
-                     cfg.threads_per_group);
+        if constexpr (GROUP == 128) {
+          if (cfg.threads_per_group == 32) {
+            pick_kx_ry(type_tag, group_tag,
+                       std::integral_constant<int, 32>{});
+          } else {
+            RuntimeCheck(false, "unsupported THREADS_PER_GROUP=",
+                         cfg.threads_per_group);
+          }
+        } else {
+          RuntimeCheck(false, "group_size=32 requires THREADS_PER_GROUP=8");
+        }
       }
     };
 
     if (data_dtype_.unwrap().code == DLDataTypeCode::kDLBfloat) {
-      dispatch(TypeTag<__nv_bfloat16>{});
+      if (group_size == 32) {
+        dispatch(TypeTag<__nv_bfloat16>{}, std::integral_constant<int, 32>{});
+      } else {
+        dispatch(TypeTag<__nv_bfloat16>{}, std::integral_constant<int, 128>{});
+      }
     } else {
-      dispatch(TypeTag<__half>{});
+      if (group_size == 32) {
+        dispatch(TypeTag<__half>{}, std::integral_constant<int, 32>{});
+      } else {
+        dispatch(TypeTag<__half>{}, std::integral_constant<int, 128>{});
+      }
     }
   }
 };
@@ -461,7 +488,7 @@ struct PerTokenCastFp8PackedKernelManual {
                       static_cast<unsigned>(blocks_y));
       const dim3 block(static_cast<unsigned>(TPG * KX * RY));
       LaunchKernel(grid, block, device)(
-          per_token_cast_fp8_packed_kernel<DType, TPG, KX, RY>,
+          per_token_cast_fp8_packed_kernel<DType, 128, TPG, KX, RY>,
           static_cast<const DType*>(x.data_ptr()),
           static_cast<uint8_t*>(y_u8.data_ptr()),
           reinterpret_cast<uint32_t*>(s_i32.data_ptr()),

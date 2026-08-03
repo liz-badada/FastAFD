@@ -142,6 +142,8 @@ static void fp8_fp4_mega_moe(
     const std::tuple<int, int, int>& recipe,
     const std::string& activation,
     const std::optional<float>& activation_clamp_opt,
+    const float& activation_alpha,
+    const float& activation_up_bias,
     const bool& fast_math
 ) {
     const auto [l1_weights, l1_weights_sf] = l1_weights_tuple;
@@ -157,6 +159,7 @@ static void fp8_fp4_mega_moe(
     const auto activation_clamp =
         activation_clamp_opt.value_or(std::numeric_limits<float>::infinity());
     DG_HOST_ASSERT(activation_clamp >= 0);
+    DG_HOST_ASSERT(activation_alpha > 0);
 
     // Tensor checks
     DG_HOST_ASSERT(get_major_type_ab(l1_weights) == cute::UMMA::Major::K);
@@ -213,7 +216,8 @@ static void fp8_fp4_mega_moe(
                                num_experts_per_rank,
                                num_tokens, num_topk,
                                hidden, intermediate_hidden,
-                               activation_clamp, fast_math);
+                               activation_clamp, activation_alpha,
+                               activation_up_bias, fast_math);
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture");
     }

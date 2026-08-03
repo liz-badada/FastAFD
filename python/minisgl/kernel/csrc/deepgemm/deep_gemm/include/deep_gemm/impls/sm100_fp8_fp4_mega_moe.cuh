@@ -33,6 +33,8 @@ template <
     uint32_t kNumEpilogueThreads,
     uint32_t kNumSMs, uint32_t kNumRanks,
     float kActivationClamp,
+    float kActivationAlpha,
+    float kActivationUpBias,
     bool kFastMath,
     uint32_t L1_SHAPE_N = kIntermediateHidden * 2,
     uint32_t L1_SHAPE_K = kHidden,
@@ -1007,16 +1009,20 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
 
                             // SwiGLU
                             auto gate = __bfloat1622float2(bf16_gate);
+                            const auto scaled_gate = __fmul2_rn(
+                                gate, {kActivationAlpha, kActivationAlpha});
                             auto neg_gate_exp = make_float2(
-                                kFastMath ? __expf(-gate.x) : expf(-gate.x),
-                                kFastMath ? __expf(-gate.y) : expf(-gate.y));
+                                kFastMath ? __expf(-scaled_gate.x) : expf(-scaled_gate.x),
+                                kFastMath ? __expf(-scaled_gate.y) : expf(-scaled_gate.y));
                             const auto denom = __fadd2_rn({1.0f, 1.0f}, neg_gate_exp);
                             if constexpr (kFastMath) {
                                 gate = __fmul2_rn(gate, {math::fast_rcp(denom.x), math::fast_rcp(denom.y)});
                             } else {
                                 gate = {gate.x / denom.x, gate.y / denom.y};
                             }
-                            const auto up = __bfloat1622float2(bf16_up);
+                            const auto up = __fadd2_rn(
+                                __bfloat1622float2(bf16_up),
+                                {kActivationUpBias, kActivationUpBias});
                             swiglu_values[i * 2 + k] = __fmul2_rn(__fmul2_rn(gate, up), weights);
                         }
 

@@ -219,7 +219,7 @@ static void mega_moe_m2n_eg(
     const int& num_layers,
     const int& num_experts_per_rank_in,
     const int& hidden_in, const int& intermediate_hidden_in,
-    const int& l1_weights_nbytes,
+    const int64_t& l1_weights_nbytes,
     const bool& use_fp8_weights,
     const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
     const torch::Tensor& sym_buffer,
@@ -236,6 +236,8 @@ static void mega_moe_m2n_eg(
     const int& num_experts, const int& num_topk,
     const int& expected_num_tokens_per_rank,
     const std::optional<float>& activation_clamp_opt,
+    const float& activation_alpha,
+    const float& activation_up_bias,
     const bool& fast_math,
     const int& num_sms,
     const int& num_prefetch_bytes,
@@ -251,6 +253,7 @@ static void mega_moe_m2n_eg(
     const auto activation_clamp =
         activation_clamp_opt.value_or(std::numeric_limits<float>::infinity());
     DG_HOST_ASSERT(activation_clamp >= 0);
+    DG_HOST_ASSERT(activation_alpha > 0);
 
     const auto arch_major = device_runtime->get_arch_major();
     const auto num_experts_per_rank = num_experts_per_rank_in;
@@ -312,7 +315,8 @@ static void mega_moe_m2n_eg(
                                       num_experts_per_rank,
                                       expected_num_tokens_per_rank, num_topk,
                                       hidden, intermediate_hidden,
-                                      activation_clamp, fast_math,
+                                      activation_clamp, activation_alpha,
+                                      activation_up_bias, fast_math,
                                       use_fp8_weights,
                                       num_sms,
                                       num_prefetch_bytes,

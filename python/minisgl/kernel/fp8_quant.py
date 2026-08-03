@@ -7,7 +7,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 FP8_MAX = 448.0
 
 
@@ -220,7 +219,7 @@ def per_token_cast_to_fp8_cuda(
     use_packed_ue8m0: bool = True,
     manual_config: tuple[int, int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-token FP8 quantization with packed UE8M0 scales (gran_k=128 only).
+    """Per-token FP8 quantization with packed UE8M0 scales.
 
     Routes through the single unified JIT CUDA kernel in
     `python/minisgl/kernel/csrc/jit/per_token_fp8_packed.cu`, which covers both
@@ -249,8 +248,10 @@ def per_token_cast_to_fp8_cuda(
         )
     if not use_ue8m0:
         raise RuntimeError("packed FP8 scales require use_ue8m0=True")
-    if int(gran_k) != 128:
-        raise RuntimeError("unified packed-UE8M0 kernel requires gran_k=128")
+    if int(gran_k) not in (32, 128):
+        raise RuntimeError("unified packed-UE8M0 kernel requires gran_k=32 or 128")
+    if manual_config is not None and int(gran_k) != 128:
+        raise RuntimeError("manual packed-UE8M0 configurations require gran_k=128")
     if not x.is_contiguous():
         x = x.contiguous()
     m, n = x.shape
@@ -269,7 +270,7 @@ def per_token_cast_to_fp8_cuda(
         tpg, kx, ry = manual_config
         module.launch_manual(x, y.view(torch.uint8), s, int(tpg), int(kx), int(ry))
     else:
-        module.launch(x, y.view(torch.uint8), s)
+        module.launch(x, y.view(torch.uint8), s, int(gran_k))
     return y, s
 
 

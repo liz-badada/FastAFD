@@ -248,6 +248,8 @@ public:
         int num_experts, num_topk;
         int num_ag_ranks, num_eg_ranks;
         float activation_clamp;
+        float activation_alpha;
+        float activation_up_bias;
         bool fast_math;
         bool use_fp8_weights;
         MegaMoEConfig config;
@@ -292,7 +294,7 @@ public:
         return fmt::format(R"(
 #include <deep_gemm/impls/sm100_mega_moe_m2n.cuh>
 
-// m2n EG kernel ABI v4.7: optional debug timing counters
+// m2n EG kernel ABI v4.8: model-specific SwiGLU parameters
 using namespace deep_gemm;
 
 static void __instantiate_kernel() {{
@@ -312,6 +314,7 @@ static void __instantiate_kernel() {{
         {}, {},
         {},
         {},
+        {}, {},
         {},
         {},
         {},
@@ -333,6 +336,8 @@ static void __instantiate_kernel() {{
     args.launch_args.grid_dim.first,
     args.num_ag_ranks, args.num_eg_ranks,
     to_string(args.activation_clamp),
+    to_string(args.activation_alpha),
+    to_string(args.activation_up_bias),
     args.fast_math ? "true" : "false",
     args.use_fp8_weights ? "true" : "false",
     args.num_lanes,
@@ -422,7 +427,7 @@ static void sm100_mega_moe_m2n_eg(
     const torch::Tensor& weight_descs,    // device uint8 [num_layers, 4, 128]
     const torch::Tensor& l1_weight_ptrs,  // device int64 [num_layers]
     const int& num_layers,
-    const int& l1_weights_nbytes,
+    const int64_t& l1_weights_nbytes,
     const std::optional<torch::Tensor> cumulative_local_expert_recv_stats,
     const std::vector<int64_t>& sym_buffer_ptrs,
     const std::vector<int64_t>& sym_buffer_ptrs1,
@@ -436,6 +441,8 @@ static void sm100_mega_moe_m2n_eg(
     const int& expected_num_tokens_per_rank, const int& num_topk,
     const int& hidden, const int& intermediate_hidden,
     const float& activation_clamp,
+    const float& activation_alpha,
+    const float& activation_up_bias,
     const bool& fast_math,
     const bool& use_fp8_weights,
     const int& num_sms_opt = 0,
@@ -594,6 +601,8 @@ static void sm100_mega_moe_m2n_eg(
         .num_experts = num_experts, .num_topk = num_topk,
         .num_ag_ranks = num_ag_ranks, .num_eg_ranks = num_eg_ranks,
         .activation_clamp = activation_clamp,
+        .activation_alpha = activation_alpha,
+        .activation_up_bias = activation_up_bias,
         .fast_math = fast_math,
         .use_fp8_weights = use_fp8_weights,
         .config = config,
