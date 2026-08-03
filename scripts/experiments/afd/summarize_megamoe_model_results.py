@@ -199,9 +199,11 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     columns = (
         "model",
         "stage",
+        "precision",
         "system",
         "topology",
         "logical_batch",
+        "physical_batch",
         "mtp_nextn",
         "microbatches",
         "layers",
@@ -209,6 +211,7 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "reference_p50_ms",
         "speedup",
         "mega_cv_percent",
+        "reference_cv_percent",
         "correctness",
         "eligible",
         "source_commit",
@@ -222,7 +225,11 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "| " + " | ".join("---" for _ in columns) + " |",
     ]
     for row in rows:
-        lines.append("| " + " | ".join(format_value(getattr(row, key)) for key in columns) + " |")
+        values = {
+            key: row.logical_batch * (row.mtp_nextn + 1) if key == "physical_batch" else getattr(row, key)
+            for key in columns
+        }
+        lines.append("| " + " | ".join(format_value(values[key]) for key in columns) + " |")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
