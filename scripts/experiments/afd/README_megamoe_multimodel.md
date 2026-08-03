@@ -217,8 +217,10 @@ sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 
 Set `MEASUREMENT_SYSTEM` to the AIC system key represented by the allocation.
 The submit script defaults to an 8-GPU B200 allocation and labels it
-`b200_sxm`. For a single-node GB200 NVL72 split measurement, override the
-Slurm resources, set the exact A:F topology, and label the result `gb200`:
+`b200_sxm`. It requests the whole node exclusively so CPU or memory co-tenants
+cannot add distributed synchronization tails. For a single-node GB200 NVL72
+split measurement, override the Slurm resources, set the exact A:F topology,
+and label the result `gb200`:
 
 ```bash
 SOURCE_ROOT=/path/to/FastAFD \
