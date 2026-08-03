@@ -274,6 +274,15 @@ def format_value(value: Any) -> str:
     return str(value)
 
 
+def format_range(values: Iterable[float]) -> str:
+    ordered = sorted(values)
+    if not ordered:
+        return "-"
+    if ordered[0] == ordered[-1]:
+        return f"{ordered[0]:.4f}"
+    return f"{ordered[0]:.4f}-{ordered[-1]:.4f}"
+
+
 def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     columns = (
         "model",
@@ -324,6 +333,51 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     }
     for contract in sorted(contracts):
         lines.append("| " + " | ".join(format_value(value) for value in contract) + " |")
+
+    lines.extend(
+        [
+            "",
+            "## Backend summary",
+            "",
+            "| model | precision | system | colocated points | split points | colocated MegaMoE p50 ms | split MegaMoE p50 ms | DeepEP / MegaMoE median | conservative lower bound | max MegaMoE CV % | reference stack |",
+            "| --- | --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for model in sorted({row.model for row in rows}):
+        model_rows = [row for row in rows if row.model == model and row.eligible]
+        colocated = [row for row in model_rows if row.stage == "agg"]
+        split = [row for row in model_rows if row.stage == "afd"]
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    model,
+                    ", ".join(sorted({row.precision for row in model_rows})),
+                    ", ".join(sorted({row.system for row in model_rows})),
+                    str(len(colocated)),
+                    str(len(split)),
+                    format_range(row.mega_p50_ms for row in colocated),
+                    format_range(row.mega_p50_ms for row in split),
+                    format_range(row.speedup for row in colocated if row.speedup is not None),
+                    format_range(
+                        row.speedup_lower_bound
+                        for row in colocated
+                        if row.speedup_lower_bound is not None
+                    ),
+                    format_value(max((row.mega_cv_percent for row in model_rows), default=None)),
+                    ", ".join(
+                        sorted(
+                            {
+                                row.reference_stack
+                                for row in colocated
+                                if row.reference_stack is not None
+                            }
+                        )
+                    ),
+                ]
+            )
+            + " |"
+        )
     environments: dict[tuple[str, ...], dict[str, set[str]]] = defaultdict(
         lambda: {"jobs": set(), "nodes": set(), "commits": set(), "trees": set()}
     )
