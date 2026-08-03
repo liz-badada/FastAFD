@@ -38,9 +38,18 @@ class MegaMoEModelProfile:
     activation_clamp: float | None
     activation_up_bias: float
     weight_precision: WeightPrecision
+    moe_quant_contract: str
     checkpoint_precision: str
 
     def validate(self, *, eg_size: int) -> None:
+        expected_quant_contract = (
+            "w4a8_mxfp4_mxfp8" if self.weight_precision == "fp4" else "fp8_e4m3_ue8m0"
+        )
+        if self.moe_quant_contract != expected_quant_contract:
+            raise ValueError(
+                f"{self.key}: weight_precision={self.weight_precision} requires "
+                f"moe_quant_contract={expected_quant_contract}"
+            )
         if self.hidden_size % 512:
             raise ValueError(f"{self.key}: hidden_size must be divisible by 512")
         if self.intermediate_size % 512:
@@ -115,7 +124,11 @@ _PROFILES = {
         activation_clamp=None,
         activation_up_bias=0.0,
         weight_precision="fp8",
-        checkpoint_precision="FP8 128x128 block scale",
+        moe_quant_contract="fp8_e4m3_ue8m0",
+        checkpoint_precision=(
+            "synthetic deterministic E4M3 benchmark weights with 128x128 source scales, "
+            "requantized to per-32 UE8M0 for MegaMoE; no checkpoint weights are loaded"
+        ),
     ),
     "minimax_m25_fp8": MegaMoEModelProfile(
         key="minimax_m25_fp8",
@@ -139,7 +152,11 @@ _PROFILES = {
         activation_clamp=None,
         activation_up_bias=0.0,
         weight_precision="fp8",
-        checkpoint_precision="FP8 128x128 block scale",
+        moe_quant_contract="fp8_e4m3_ue8m0",
+        checkpoint_precision=(
+            "synthetic deterministic E4M3 benchmark weights with 128x128 source scales, "
+            "requantized to per-32 UE8M0 for MegaMoE; no checkpoint weights are loaded"
+        ),
     ),
     "minimax_m3_fp8": MegaMoEModelProfile(
         key="minimax_m3_fp8",
@@ -163,9 +180,10 @@ _PROFILES = {
         activation_clamp=7.0,
         activation_up_bias=1.0,
         weight_precision="fp8",
+        moe_quant_contract="fp8_e4m3_ue8m0",
         checkpoint_precision=(
-            "synthetic FP8 128x128 conversion for an FP8-isolated kernel comparison; "
-            "not the native W4A8 model precision"
+            "synthetic deterministic E4M3 benchmark weights with 128x128 source scales, "
+            "requantized to per-32 UE8M0 for MegaMoE; no checkpoint weights are loaded"
         ),
     ),
     "deepseek_v4_flash_fp8": MegaMoEModelProfile(
@@ -190,7 +208,11 @@ _PROFILES = {
         activation_clamp=10.0,
         activation_up_bias=0.0,
         weight_precision="fp8",
-        checkpoint_precision="FP8 128x128 block scale",
+        moe_quant_contract="fp8_e4m3_ue8m0",
+        checkpoint_precision=(
+            "synthetic deterministic E4M3 benchmark weights with 128x128 source scales, "
+            "requantized to per-32 UE8M0 for MegaMoE; no checkpoint weights are loaded"
+        ),
     ),
     "deepseek_v4_pro_fp8": MegaMoEModelProfile(
         key="deepseek_v4_pro_fp8",
@@ -214,29 +236,42 @@ _PROFILES = {
         activation_clamp=10.0,
         activation_up_bias=0.0,
         weight_precision="fp8",
-        checkpoint_precision="FP8 conversion of the native FP4 model",
+        moe_quant_contract="fp8_e4m3_ue8m0",
+        checkpoint_precision=(
+            "synthetic deterministic E4M3 benchmark weights with 128x128 source scales, "
+            "requantized to per-32 UE8M0 for MegaMoE; no checkpoint weights are loaded"
+        ),
     ),
 }
 
 _PROFILES["qwen3_235b_fp4"] = replace(
     _PROFILES["qwen3_235b_fp8"].with_weight_precision("fp4"),
     key="qwen3_235b_fp4",
-    model_path="nvidia/Qwen3-235B-A22B-NVFP4",
-    checkpoint_precision="native NVFP4 block-32 weights with FP8 activations",
+    model_path="Qwen/Qwen3-235B-A22B-FP8",
+    moe_quant_contract="w4a8_mxfp4_mxfp8",
+    checkpoint_precision=(
+        "synthetic deterministic BF16 benchmark weights quantized to E2M1 with "
+        "UE8M0 block-32 scales; no checkpoint weights are loaded"
+    ),
 )
 _PROFILES["minimax_m25_fp4"] = replace(
     _PROFILES["minimax_m25_fp8"].with_weight_precision("fp4"),
     key="minimax_m25_fp4",
-    model_path="nvidia/MiniMax-M2.5-NVFP4",
-    checkpoint_precision="native NVFP4 block-32 weights with FP8 activations",
+    model_path="MiniMaxAI/MiniMax-M2.5",
+    moe_quant_contract="w4a8_mxfp4_mxfp8",
+    checkpoint_precision=(
+        "synthetic deterministic BF16 benchmark weights quantized to E2M1 with "
+        "UE8M0 block-32 scales; no checkpoint weights are loaded"
+    ),
 )
 _PROFILES["minimax_m3_fp4"] = _PROFILES["minimax_m3_fp8"].with_weight_precision("fp4")
 _PROFILES["minimax_m3_fp4"] = replace(
     _PROFILES["minimax_m3_fp4"],
     key="minimax_m3_fp4",
+    moe_quant_contract="w4a8_mxfp4_mxfp8",
     checkpoint_precision=(
-        "synthetic MXFP4 block-32 weights with MXFP8 activations; a projected "
-        "W4A8 deployment contract, not the native BF16 checkpoint"
+        "synthetic deterministic BF16 benchmark weights quantized to E2M1 with "
+        "UE8M0 block-32 scales; no checkpoint weights are loaded"
     ),
 )
 
@@ -246,7 +281,11 @@ _PROFILES["deepseek_v4_flash_fp4"] = replace(
     key="deepseek_v4_flash_fp4",
     model_path="deepseek-ai/DeepSeek-V4-Flash",
     simulation_model_path="deepseek-ai/DeepSeek-V4-Flash",
-    checkpoint_precision="native FP4 weights with FP8 activations",
+    moe_quant_contract="w4a8_mxfp4_mxfp8",
+    checkpoint_precision=(
+        "synthetic deterministic BF16 benchmark weights quantized to E2M1 with "
+        "UE8M0 block-32 scales; no checkpoint weights are loaded"
+    ),
 )
 _PROFILES["deepseek_v4_pro_fp4"] = _PROFILES["deepseek_v4_pro_fp8"].with_weight_precision("fp4")
 _PROFILES["deepseek_v4_pro_fp4"] = replace(
@@ -254,7 +293,11 @@ _PROFILES["deepseek_v4_pro_fp4"] = replace(
     key="deepseek_v4_pro_fp4",
     model_path="deepseek-ai/DeepSeek-V4-Pro",
     simulation_model_path="deepseek-ai/DeepSeek-V4-Pro",
-    checkpoint_precision="native FP4 weights with FP8 activations",
+    moe_quant_contract="w4a8_mxfp4_mxfp8",
+    checkpoint_precision=(
+        "synthetic deterministic BF16 benchmark weights quantized to E2M1 with "
+        "UE8M0 block-32 scales; no checkpoint weights are loaded"
+    ),
 )
 
 MEGAMOE_MODEL_PROFILES = dict(_PROFILES)

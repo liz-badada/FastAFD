@@ -711,7 +711,7 @@ def main() -> None:
         correctness = {
             "contract": (
                 "MegaMoE and official DeepEP+DeepGEMM use identical block-128 FP8 "
-                f"inputs, routes, {profile.weight_precision} weights, model activation "
+                f"inputs, routes, {profile.moe_quant_contract} quantization, model activation "
                 "and pre-L2 top-k weighting "
                 "for the numerical check; timed paths retain their production contracts"
             ),
@@ -852,7 +852,7 @@ def main() -> None:
             "system_label": os.environ.get("MEASUREMENT_SYSTEM", "unspecified"),
             "measurement_boundary": (
                 "colocated MoE stage with identical input, route, "
-                f"{profile.weight_precision} weights and "
+                f"the {profile.moe_quant_contract} quantization contract and "
                 "model-specific activation contract: FastAFD MegaMoE fuses dispatch, L1, "
                 "activation/requant, L2 and combine; the reference executes official DeepEP "
                 "normal dispatch/combine, SGLang scatter/gather and two contiguous DeepGEMM "

@@ -44,10 +44,18 @@ def test_fp4_profile_preserves_the_model_contract(fp8_key: str, fp4_key: str) ->
     fp8 = get_megamoe_model_profile(fp8_key)
     fp4 = get_megamoe_model_profile(fp4_key)
     assert fp4.weight_precision == "fp4"
+    assert fp4.moe_quant_contract == "w4a8_mxfp4_mxfp8"
     assert fp4.hidden_size == fp8.hidden_size
     assert fp4.intermediate_size == fp8.intermediate_size
     assert fp4.protocol_top_k == fp8.protocol_top_k
     assert fp4.activation == fp8.activation
+
+
+def test_fp4_benchmark_does_not_claim_native_nvfp4_checkpoint_weights() -> None:
+    profile = get_megamoe_model_profile("qwen3_235b_fp4")
+    assert profile.moe_quant_contract == "w4a8_mxfp4_mxfp8"
+    assert "no checkpoint weights are loaded" in profile.checkpoint_precision
+    assert "NVFP4" not in profile.checkpoint_precision
 
 
 def test_invalid_expert_parallel_size_fails_closed() -> None:

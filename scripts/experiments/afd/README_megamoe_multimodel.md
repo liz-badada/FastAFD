@@ -26,11 +26,10 @@ The model registry provides split-stage contracts for:
 - `deepseek_v4_flash_{fp8,fp4}`
 - `deepseek_v4_pro_{fp8,fp4}`
 
-The split AFD runner supports both listed precisions. The matched colocated
-MegaMoE-versus-DeepEP+DeepGEMM runner currently supports FP8 activations with
-FP4 weights only, matching the available colocated MegaMoE kernel. Use the FP4
-profile names for an AGG/AFD same-backend comparison; do not relabel an FP4
-measurement as an FP8 result.
+The split AFD runner supports both listed storage widths. The matched colocated
+MegaMoE-versus-DeepEP+DeepGEMM runner uses E2M1 weights with UE8M0 block-32
+scales and E4M3 activations with UE8M0 scales. Its exact AIC precision key is
+`w4a8_mxfp4_mxfp8`; it is not an NVFP4 measurement.
 
 Being listed means that the benchmark has an explicit model-shape contract. It
 does not mean that every model is already qualified for profile export; each
@@ -40,10 +39,12 @@ The exact hidden size, intermediate size, routed expert count, top-k, shared
 expert count, routing scale, and activation contract are defined in
 `python/minisgl/moe/megamoe_model_profiles.py`.
 
-Each profile records two paths when needed: `model_path` identifies the
-measured checkpoint/weight contract, while `simulation_model_path` is the exact
-model identity used by the AIC shape model. Quantization remains a separate
-exact profile key; the exporter never treats the two paths as interchangeable.
+Each profile records `model_path` for the architecture/checkpoint family and
+`simulation_model_path` for the exact AIC model identity. The benchmark uses
+deterministic synthetic weights with the declared shape; it does not load
+checkpoint tensors. `moe_quant_contract` is therefore a separate exact profile
+key, and the exporter never infers native checkpoint precision from a model
+name.
 
 ## Reproduction order
 
@@ -166,9 +167,10 @@ bash scripts/experiments/afd/run_megamoe_m2n_model_benchmark.sh
 
 Use the colocated path for an AGG worker. `BACKEND=both` measures MegaMoE and
 the official DeepEP normal path with SGLang scatter/gather and two contiguous
-DeepGEMM GEMMs. The paths share BF16 inputs, routes, model-precision weights,
-activation, and output scaling. Each retains its production input quantization
-granularity: block-32 for MegaMoE and block-128 for the SGLang DeepEP path.
+DeepGEMM GEMMs. The paths share BF16 inputs, routes, the same synthetic
+MXFP4-format weights, activation, and output scaling. Each retains its
+production input-activation quantization granularity: block-32 for MegaMoE and
+block-128 for the SGLang DeepEP path.
 
 ```bash
 MODEL=qwen3_235b_fp4 \
