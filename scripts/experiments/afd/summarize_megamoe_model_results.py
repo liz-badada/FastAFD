@@ -225,6 +225,8 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "",
         "Only exact measured points are listed. An AFD row is eligible only when it is stable and the same model, precision, and system has a correctness-passing colocated MegaMoE-versus-DeepEP result.",
         "",
+        "The speedup columns compare complete colocated MoE-stage backend paths, including production quantization, dispatch/combine, expert alignment, scatter/gather, and GEMMs. They are not GEMM-only or end-to-end serving speedups. The AIC profile consumes the absolute MegaMoE latency.",
+        "",
         "| " + " | ".join(columns) + " |",
         "| " + " | ".join("---" for _ in columns) + " |",
     ]

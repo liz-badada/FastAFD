@@ -151,6 +151,14 @@ The raw JSON is the source of truth. The CSV and Markdown files are compact
 views, and `afd_moe_stage_profile.json` contains only validated exact points.
 Do not hand-enter one constant `afd_moe_time_ms` for an entire sweep.
 
+The reported MegaMoE speedup is a ratio of the complete colocated MoE-stage
+backend paths, not a GEMM-only ratio and not an end-to-end serving speedup. It
+includes each backend's production activation quantization and the reference
+path's 128-row per-expert alignment, DeepEP dispatch/combine, SGLang
+scatter/gather, and two DeepGEMM calls. Low expert occupancy can therefore make
+the stage ratio much larger than the final system gain. AIC consumes the
+absolute MegaMoE stage latency; the reference ratio is validation evidence.
+
 ## Measurement paths
 
 Use the split path for an AFD F pool:
