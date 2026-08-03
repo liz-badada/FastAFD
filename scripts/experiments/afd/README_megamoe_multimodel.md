@@ -240,10 +240,12 @@ pass:
 
 1. The CUDA input and activation quantizers match their Torch references with
    zero FP8-byte and packed-scale mismatches on every rank.
-2. MegaMoE and the official DeepEP reference have relative L2 output error at
-   most `1e-3` on every rank under the common numerical-check contract. That
-   check uses the same block-128 FP8 input and pre-L2 top-k weighting on both
-   paths; timed samples retain each backend's production quantization path.
+2. MegaMoE and the official DeepEP reference produce finite BF16 outputs that
+   differ by at most one BF16 ULP elementwise on every rank under the common
+   numerical-check contract. Relative L2 remains recorded as a diagnostic.
+   The check uses the same block-128 FP8 input and pre-L2 top-k weighting on
+   both paths; timed samples retain each backend's production quantization
+   path.
 3. MegaMoE has stage CUDA latency CV at most 3% and finite output on every
    rank. The reference CV is still reported, but it does not gate the measured
    MegaMoE latency profile.
