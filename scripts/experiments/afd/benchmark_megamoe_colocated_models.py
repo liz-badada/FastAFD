@@ -730,8 +730,18 @@ def main() -> None:
         )
         for name in order:
             dist.barrier()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
             output_by_backend[name] = run_backend(name)
-            torch.cuda.synchronize()
+            end.record()
+            end.synchronize()
+            gathered = [None] * world_size if rank == 0 else None
+            dist.gather_object(
+                {"cuda_ms": float(start.elapsed_time(end))},
+                object_gather_list=gathered,
+                dst=0,
+            )
 
     gathered_iterations: dict[str, list[list[dict[str, float]]]] = {
         name: [] for name in enabled_backends
