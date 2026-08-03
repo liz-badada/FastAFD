@@ -479,8 +479,11 @@ def deepep_stage_once(
         expert_weights = None
         gather_weights = None
         if weight_before_l2_quant:
-            valid = (dispatch.output_index >= 0) & (
-                dispatch.output_index < recv_tokens
+            valid = (
+                (dispatch.topk_ids >= 0)
+                & (dispatch.topk_ids < buffer.num_experts)
+                & (dispatch.output_index >= 0)
+                & (dispatch.output_index < recv_tokens)
             )
             expert_weights = torch.ones(
                 recv_tokens,
