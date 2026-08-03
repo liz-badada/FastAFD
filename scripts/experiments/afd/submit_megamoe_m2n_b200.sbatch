@@ -14,7 +14,8 @@
 
 set -euo pipefail
 
-image=${CONTAINER_IMAGE:-/home/scratch.jinyanc_wwfo/enroot_images/sglang_deepseek_v4_blackwell.sqsh}
+: "${CONTAINER_IMAGE:?Set CONTAINER_IMAGE to the site-local SGLang Blackwell container image}"
+image=${CONTAINER_IMAGE}
 measurement_system=${MEASUREMENT_SYSTEM:-b200_sxm}
 run_script=${RUN_SCRIPT:-run_megamoe_m2n_model_benchmark.sh}
 source_root=${SOURCE_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}
@@ -65,11 +66,8 @@ if [[ ! ${allocation_gpus} =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 mounts="${host_root}:/workspace"
-if [[ -d /home/scratch.jinyanc_wwfo/cargo ]]; then
-  mounts+=",/home/scratch.jinyanc_wwfo/cargo:/home/scratch.jinyanc_wwfo/cargo:ro"
-fi
-if [[ -f /home/jinyanc/.local/bin/env ]]; then
-  mounts+=",/home/jinyanc/.local/bin/env:/home/jinyanc/.local/bin/env:ro"
+if [[ -n ${EXTRA_CONTAINER_MOUNTS:-} ]]; then
+  mounts+=",${EXTRA_CONTAINER_MOUNTS}"
 fi
 
 srun \

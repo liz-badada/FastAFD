@@ -16,6 +16,7 @@ git clone --branch megamoe-multimodel-b200 \
 cd FastAFD
 git status --short
 git rev-parse HEAD
+export CONTAINER_IMAGE=/path/to/sglang_blackwell.sqsh
 ```
 
 The model registry provides split-stage contracts for:
@@ -256,9 +257,11 @@ sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 ```
 
 `SOURCE_ROOT` defaults to the Slurm submission directory, and `HOST_ROOT`
-defaults to its parent. Set `CONTAINER_IMAGE` to the local path of the SGLang
-Blackwell image when the site does not provide the default image path. The
-parent mount makes `/workspace/results/...` persistent beside the checkout.
+defaults to its parent. `CONTAINER_IMAGE` is required and must name the
+site-local SGLang Blackwell image. The parent mount makes
+`/workspace/results/...` persistent beside the checkout. If the site requires
+additional mounts, pass their comma-separated Enroot specifications through
+`EXTRA_CONTAINER_MOUNTS`; the script has no user-specific mount dependency.
 
 Set `MEASUREMENT_SYSTEM` to the AIC system key represented by the allocation.
 The submit script defaults to an 8-GPU B200 allocation and labels it
