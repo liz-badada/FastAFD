@@ -1,0 +1,141 @@
+# Multi-model MegaMoE measurement
+
+This benchmark measures model-shaped MegaMoE stages for:
+
+- `qwen3_235b_{fp8,fp4}`
+- `minimax_m25_{fp8,fp4}`
+- `minimax_m3_{fp8,fp4}`
+- `deepseek_v4_flash_{fp8,fp4}`
+- `deepseek_v4_pro_{fp8,fp4}`
+
+The exact hidden size, intermediate size, routed expert count, top-k, shared
+expert count, routing scale, and activation contract are defined in
+`python/minisgl/moe/megamoe_model_profiles.py`.
+
+## Reproduction order
+
+1. Run the one-layer, low-batch smoke suite. This checks compilation, all-rank
+   finite outputs, quantization, and the colocated numerical reference before
+   allocating time to a full sweep.
+
+   ```bash
+   SOURCE_ROOT=/path/to/FastAFD \
+   RUN_SCRIPT=run_megamoe_colocated_model_smoke_suite.sh \
+   BACKEND=both TOKENS_PER_RANK=8 LAYERS=1 \
+   sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+   ```
+
+2. Run the exact workload grid needed by the AIC sweep. All grid variables are
+   whitespace-separated lists and may be narrowed without editing Python.
+
+   ```bash
+   SOURCE_ROOT=/path/to/FastAFD \
+   RUN_SCRIPT=run_megamoe_colocated_model_suite.sh \
+   MODELS="qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 deepseek_v4_flash_fp4 deepseek_v4_pro_fp4" \
+   TOKENS_PER_RANK_GRID="8 16 32 48 64 96 128 192" \
+   MTP_NEXTN_GRID="0 1 2 3" \
+   sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+
+   SOURCE_ROOT=/path/to/FastAFD \
+   RUN_SCRIPT=run_megamoe_m2n_model_suite.sh \
+   AFD_SPLIT_GRID="4:4" \
+   SEQUENCES_PER_AG_RANK_GRID="8 16 32 48 64 96 128 192" \
+   MICROBATCH_GRID="1 2 4" MTP_NEXTN_GRID="0 1 2 3" \
+   sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+   ```
+
+3. Convert raw JSON files into the review table and exact-only AIC profile.
+
+   ```bash
+   python scripts/experiments/afd/summarize_megamoe_model_results.py \
+     /path/to/colocated-results /path/to/split-results \
+     --csv /path/to/megamoe_latency_reference.csv \
+     --markdown /path/to/megamoe_latency_reference.md \
+     --profile /path/to/afd_moe_stage_profile.json
+   ```
+
+The raw JSON is the source of truth. The CSV and Markdown files are compact
+views, and `afd_moe_stage_profile.json` contains only validated exact points.
+Do not hand-enter one constant `afd_moe_time_ms` for an entire sweep.
+
+## Measurement paths
+
+Use the split path for an AFD F pool:
+
+```bash
+MODEL=qwen3_235b_fp8 \
+AG_SIZE=4 EG_SIZE=4 \
+SEQUENCES_PER_AG_RANK=96 \
+MTP_NEXTN=0 MICROBATCHES=2 \
+LAYERS=94 ROUTING=balanced \
+WARMUPS=5 ITERATIONS=30 \
+RESULTS_DIR=/workspace/results/megamoe-split \
+bash scripts/experiments/afd/run_megamoe_m2n_model_benchmark.sh
+```
+
+Use the colocated path for an AGG worker. `BACKEND=both` measures MegaMoE and
+the official DeepEP normal path with SGLang scatter/gather and two contiguous
+DeepGEMM GEMMs. The paths share BF16 inputs, routes, FP4 weights, activation,
+and output scaling. Each retains its production input quantization granularity:
+block-32 for MegaMoE and block-128 for the SGLang DeepEP path.
+
+```bash
+MODEL=qwen3_235b_fp4 \
+EP_SIZE=8 TOKENS_PER_RANK=96 \
+MTP_NEXTN=0 LAYERS=94 \
+ROUTING=balanced BACKEND=both WEIGHT_SLOTS=2 \
+WARMUPS=5 ITERATIONS=30 \
+RESULTS_DIR=/workspace/results/megamoe-colocated \
+bash scripts/experiments/afd/run_megamoe_colocated_model_benchmark.sh
+```
+
+`TOKENS_PER_RANK` and `SEQUENCES_PER_AG_RANK` are logical request counts.
+The scripts execute `logical_count * (MTP_NEXTN + 1)` physical verification
+tokens. MTP acceptance is intentionally not applied to kernel latency.
+
+On the configured ComputeLab B200 partition, submit either runner through:
+
+```bash
+SOURCE_ROOT=/path/to/FastAFD \
+RUN_SCRIPT=run_megamoe_colocated_model_benchmark.sh \
+MODEL=qwen3_235b_fp4 EP_SIZE=8 TOKENS_PER_RANK=96 \
+BACKEND=both LAYERS=94 WARMUPS=5 ITERATIONS=30 \
+RESULTS_DIR=/workspace/results/megamoe-colocated \
+sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+```
+
+Set `MEASUREMENT_SYSTEM` to the AIC system key represented by the allocation.
+The B200 submit script defaults it to `b200`; a GB200/NVL72 submission must set
+`MEASUREMENT_SYSTEM=gb200` and use the corresponding partition and GPU count.
+
+## Acceptance gates
+
+A result is eligible for a calibrated profile only when all applicable gates
+pass:
+
+1. The CUDA input and activation quantizers match their Torch references with
+   zero FP8-byte and packed-scale mismatches on every rank.
+2. MegaMoE and the official DeepEP reference have relative L2 output error at
+   most `1e-3` on every rank under the common numerical-check contract. That
+   check uses the same block-128 FP8 input and pre-L2 top-k weighting on both
+   paths; timed samples retain each backend's production quantization path.
+3. Both backends have stage CUDA latency CV at most 3% and finite output on
+   every rank.
+4. `speedup_deepep_over_megamoe` is greater than 1 for the same case.
+
+The JSON contains every latency sample, per-rank provenance, the source commit
+and tree hash, model contract, physical token count, routing load, correctness,
+stability, and the final `eligible_for_profile` decision.
+
+## AIC timing boundary
+
+These JSON stage measurements are not automatically interchangeable with the
+AIC `afd_moe_time_ms` option. That option expects one full-resident-batch F-stage
+wall time across all MoE layers and microbatches, including F-stage
+communication and excluding router. A single-layer MegaMoE module latency must
+first be aggregated with the exact layer, microbatch, EP, physical-token, and
+communication contract. For a reusable AIC backend, publish a keyed latency
+table rather than one constant.
+
+Do not label B200 measurements as GB200 calibration. Run the same matrix on
+GB200 when the target AIC system is `gb200`.

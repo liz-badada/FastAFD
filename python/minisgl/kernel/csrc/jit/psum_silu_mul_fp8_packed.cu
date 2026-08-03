@@ -9,6 +9,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
@@ -128,7 +129,8 @@ __device__ __forceinline__ int32_t psum_find_expert(
   return lo;
 }
 
-template <typename DType, int block_count, int THREADS_PER_GROUP>
+template <typename DType, int block_count, int GROUP_SIZE,
+          int THREADS_PER_GROUP, int ACTIVATION_MODE>
 __global__ void psum_silu_mul_fp8_packed_compact_all_groups_kernel(
     const DType* __restrict__ x,
     uint8_t* __restrict__ y,
@@ -142,9 +144,11 @@ __global__ void psum_silu_mul_fp8_packed_compact_all_groups_kernel(
     int num_experts,
     int alignment,
     bool apply_topk,
+    float activation_clamp,
+    float activation_alpha,
+    float activation_up_bias,
     float eps,
     float max_8bit) {
-  constexpr int GROUP_SIZE = 128;
   constexpr int VEC_SIZE = GROUP_SIZE / THREADS_PER_GROUP;
   static_assert(GROUP_SIZE == THREADS_PER_GROUP * VEC_SIZE);
   static_assert(VEC_SIZE % 4 == 0);
@@ -209,10 +213,20 @@ __global__ void psum_silu_mul_fp8_packed_compact_all_groups_kernel(
       const float tw = apply_topk ? topk_weights[row] : 1.0f;
 #pragma unroll
       for (int i = 0; i < VEC_SIZE; ++i) {
-        const float g = scalar_to_float<DType>(gate_regs[i]);
-        const float u = scalar_to_float<DType>(up_regs[i]);
-        const float silu = g / (1.0f + __expf(-g));
-        values[i] = silu * u * tw;
+        float g = scalar_to_float<DType>(gate_regs[i]);
+        float u = scalar_to_float<DType>(up_regs[i]);
+        if constexpr (ACTIVATION_MODE != 0) {
+          g = fminf(g, activation_clamp);
+          u = fmaxf(-activation_clamp, fminf(u, activation_clamp));
+        }
+        if constexpr (ACTIVATION_MODE == 2) {
+          const float silu =
+              g / (1.0f + __expf(-activation_alpha * g));
+          values[i] = silu * (u + activation_up_bias) * tw;
+        } else {
+          const float silu = g / (1.0f + __expf(-g));
+          values[i] = silu * u * tw;
+        }
         local_absmax = fmaxf(local_absmax, fabsf(values[i]));
       }
 
@@ -264,7 +278,11 @@ struct PsumSiluMulFp8PackedKernel {
       const tvm::ffi::TensorView psum,                // (num_experts,) int32 cumulative
       const tvm::ffi::TensorView topk_weights,        // (m,) float32 or (1,) when unused
       int64_t alignment,
-      bool apply_topk) {
+      bool apply_topk,
+      int64_t group_size,
+      double activation_clamp,
+      double activation_alpha,
+      double activation_up_bias) {
     using namespace host;
     auto device_ = SymbolicDevice{};
     auto data_dtype_ = SymbolicDType{};
@@ -296,7 +314,6 @@ struct PsumSiluMulFp8PackedKernel {
         .with_device<kDLCUDA>(device_)
         .verify(topk_weights);
 
-    constexpr int GROUP_SIZE = 128;
     const auto m = m_.unwrap();
     const auto h = h_.unwrap();
     const auto h2 = h2_.unwrap();
@@ -304,9 +321,15 @@ struct PsumSiluMulFp8PackedKernel {
     const auto num_experts = e_.unwrap();
     RuntimeCheck(h2 == 2 * h, "expected x.shape[1] == 2 * y.shape[1], got ",
                  h2, " vs 2*", h);
-    RuntimeCheck(h % GROUP_SIZE == 0, "h=", h,
-                 " must be divisible by GROUP_SIZE=", GROUP_SIZE);
-    const auto groups_per_row = h / GROUP_SIZE;
+    RuntimeCheck(group_size == 32 || group_size == 128,
+                 "group_size must be 32 or 128, got ", group_size);
+    RuntimeCheck(h % group_size == 0, "h=", h,
+                 " must be divisible by group_size=", group_size);
+    RuntimeCheck(activation_clamp >= 0.0,
+                 "activation_clamp must be non-negative");
+    RuntimeCheck(activation_alpha > 0.0,
+                 "activation_alpha must be positive");
+    const auto groups_per_row = h / group_size;
     const auto k_num_packed_sfk = (groups_per_row + 3) / 4;
     const auto tma_aligned_m = ((m + 3) / 4) * 4;
     RuntimeCheck(pg == k_num_packed_sfk,
@@ -318,10 +341,6 @@ struct PsumSiluMulFp8PackedKernel {
       return;
     }
     const auto device = device_.unwrap();
-    RuntimeCheck(groups_per_row > 0 && groups_per_row * 8 <= 1024,
-                 "compact_all psum_silu_mul_fp8_packed requires ",
-                 "0 < groups_per_row * 8 <= 1024, got groups_per_row=",
-                 groups_per_row);
     if (const char* mode = std::getenv("MINISGL_PSUM_SILU_QUANT_MODE")) {
       RuntimeCheck(std::strcmp(mode, "auto") == 0 ||
                    std::strcmp(mode, "compact_all") == 0 ||
@@ -329,19 +348,29 @@ struct PsumSiluMulFp8PackedKernel {
                    "MINISGL_PSUM_SILU_QUANT_MODE must be auto or compact_all");
     }
 
-    auto launch_compact_all_groups = [&](auto type_tag, auto block_count_tag) {
+    auto launch_compact_all_groups = [&](auto type_tag, auto block_count_tag,
+                                         auto group_size_tag,
+                                         auto threads_per_group_tag,
+                                         auto activation_mode_tag) {
       using DType = typename decltype(type_tag)::type;
       constexpr int BLOCK_COUNT = decltype(block_count_tag)::value;
-      RuntimeCheck(groups_per_row > 0 && groups_per_row * 8 <= 1024,
+      constexpr int GROUP_SIZE = decltype(group_size_tag)::value;
+      constexpr int THREADS_PER_GROUP = decltype(threads_per_group_tag)::value;
+      constexpr int ACTIVATION_MODE = decltype(activation_mode_tag)::value;
+      RuntimeCheck(groups_per_row > 0 &&
+                       groups_per_row * THREADS_PER_GROUP <= 1024,
                    "invalid compact_all_groups psum_silu_mul_fp8_packed "
                    "block size: ",
-                   groups_per_row * 8);
+                   groups_per_row * THREADS_PER_GROUP);
       const size_t shared_mem =
           static_cast<size_t>(2 * num_experts + 1) * sizeof(int32_t);
       LaunchKernel(dim3(static_cast<unsigned>(BLOCK_COUNT)),
-                   dim3(static_cast<unsigned>(groups_per_row * 8)), device,
+                   dim3(static_cast<unsigned>(
+                       groups_per_row * THREADS_PER_GROUP)), device,
                    shared_mem)(
-          psum_silu_mul_fp8_packed_compact_all_groups_kernel<DType, BLOCK_COUNT, 8>,
+          psum_silu_mul_fp8_packed_compact_all_groups_kernel<
+              DType, BLOCK_COUNT, GROUP_SIZE, THREADS_PER_GROUP,
+              ACTIVATION_MODE>,
           static_cast<const DType*>(x.data_ptr()),
           static_cast<uint8_t*>(y_u8.data_ptr()),
           reinterpret_cast<uint32_t*>(s_i32.data_ptr()),
@@ -354,13 +383,48 @@ struct PsumSiluMulFp8PackedKernel {
           static_cast<int>(num_experts),
           static_cast<int>(alignment),
           apply_topk,
+          static_cast<float>(activation_clamp),
+          static_cast<float>(activation_alpha),
+          static_cast<float>(activation_up_bias),
           1e-10f,
           448.0f);
     };
 
+    auto dispatch_activation = [&](auto type_tag, auto group_size_tag,
+                                   auto threads_per_group_tag) {
+      const bool has_clamp = std::isfinite(activation_clamp);
+      const bool has_oai_parameters =
+          activation_alpha != 1.0 || activation_up_bias != 0.0;
+      if (has_oai_parameters) {
+        launch_compact_all_groups(
+            type_tag, std::integral_constant<int, 132 * 32>{},
+            group_size_tag, threads_per_group_tag,
+            std::integral_constant<int, 2>{});
+      } else if (has_clamp) {
+        launch_compact_all_groups(
+            type_tag, std::integral_constant<int, 132 * 32>{},
+            group_size_tag, threads_per_group_tag,
+            std::integral_constant<int, 1>{});
+      } else {
+        launch_compact_all_groups(
+            type_tag, std::integral_constant<int, 132 * 32>{},
+            group_size_tag, threads_per_group_tag,
+            std::integral_constant<int, 0>{});
+      }
+    };
+
     auto dispatch = [&](auto type_tag) {
-      launch_compact_all_groups(
-          type_tag, std::integral_constant<int, 132 * 32>{});
+      if (group_size == 32) {
+        dispatch_activation(
+            type_tag,
+            std::integral_constant<int, 32>{},
+            std::integral_constant<int, 4>{});
+      } else {
+        dispatch_activation(
+            type_tag,
+            std::integral_constant<int, 128>{},
+            std::integral_constant<int, 8>{});
+      }
     };
 
     if (data_dtype_.unwrap().code == DLDataTypeCode::kDLBfloat) {
@@ -382,6 +446,10 @@ struct PsumSiluMulFp8PackedKernelManual {
       const tvm::ffi::TensorView topk_weights,
       int64_t alignment,
       bool apply_topk,
+      int64_t group_size,
+      double activation_clamp,
+      double activation_alpha,
+      double activation_up_bias,
       int64_t threads_per_group,
       int64_t groups_per_block_x,
       int64_t rows_per_block) {
@@ -389,7 +457,9 @@ struct PsumSiluMulFp8PackedKernelManual {
     (void)groups_per_block_x;
     (void)rows_per_block;
     PsumSiluMulFp8PackedKernel::run(
-        x, y_u8, s_i32, psum, topk_weights, alignment, apply_topk);
+        x, y_u8, s_i32, psum, topk_weights, alignment, apply_topk,
+        group_size, activation_clamp, activation_alpha,
+        activation_up_bias);
   }
 };
 

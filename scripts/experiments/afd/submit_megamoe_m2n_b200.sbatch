@@ -15,10 +15,19 @@ set -euo pipefail
 
 host_root=${HOST_ROOT:-/home/scratch.jinyanc_wwfo/fastafd_measure_20260721}
 image=${CONTAINER_IMAGE:-/home/scratch.jinyanc_wwfo/enroot_images/sglang_deepseek_v4_blackwell.sqsh}
+measurement_system=${MEASUREMENT_SYSTEM:-b200}
 run_script=${RUN_SCRIPT:-run_megamoe_m2n_model_benchmark.sh}
 source_root=${SOURCE_ROOT:-${host_root}/FastAFD-megamoe-multimodel}
+case "${source_root}" in
+  "${host_root}"/*) ;;
+  *)
+    echo "SOURCE_ROOT must be under HOST_ROOT so the measured tree is mounted: ${source_root}" >&2
+    exit 2
+    ;;
+esac
+container_source_root="/workspace/${source_root#"${host_root}/"}"
 case "${run_script}" in
-  run_megamoe_m2n_model_benchmark.sh|run_megamoe_m2n_model_smoke_suite.sh|run_megamoe_colocated_model_benchmark.sh|run_megamoe_colocated_model_smoke_suite.sh) ;;
+  run_megamoe_m2n_model_benchmark.sh|run_megamoe_m2n_model_smoke_suite.sh|run_megamoe_m2n_model_suite.sh|run_megamoe_colocated_model_benchmark.sh|run_megamoe_colocated_model_smoke_suite.sh|run_megamoe_colocated_model_suite.sh) ;;
   *)
     echo "Unsupported RUN_SCRIPT: ${run_script}" >&2
     exit 2
@@ -61,6 +70,6 @@ srun \
   --container-image="${image}" \
   --no-container-entrypoint \
   --container-mounts="${mounts}" \
-  --container-workdir=/workspace/FastAFD-megamoe-multimodel \
-  --export="ALL,MEASUREMENT_CONTAINER_IMAGE=${image},MEASUREMENT_SOURCE_COMMIT=${source_commit},MEASUREMENT_SOURCE_BRANCH=${source_branch},MEASUREMENT_SOURCE_DIRTY=${source_dirty},MEASUREMENT_SOURCE_DIFF_SHA256=${source_diff_sha256},MEASUREMENT_SOURCE_TREE_SHA256=${source_tree_sha256}" \
-  /bin/bash "/workspace/FastAFD-megamoe-multimodel/scripts/experiments/afd/${run_script}"
+  --container-workdir="${container_source_root}" \
+  --export="ALL,FASTAFD_ROOT=${container_source_root},MEASUREMENT_SYSTEM=${measurement_system},MEASUREMENT_CONTAINER_IMAGE=${image},MEASUREMENT_SOURCE_COMMIT=${source_commit},MEASUREMENT_SOURCE_BRANCH=${source_branch},MEASUREMENT_SOURCE_DIRTY=${source_dirty},MEASUREMENT_SOURCE_DIFF_SHA256=${source_diff_sha256},MEASUREMENT_SOURCE_TREE_SHA256=${source_tree_sha256}" \
+  /bin/bash "${container_source_root}/scripts/experiments/afd/${run_script}"

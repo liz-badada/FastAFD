@@ -547,6 +547,7 @@ def main() -> None:
         payload = {
             "schema": "fastafd.megamoe-m2n-model-benchmark.v1",
             "generated_at": utc_now(),
+            "system_label": os.environ.get("MEASUREMENT_SYSTEM", "unspecified"),
             "measurement_boundary": (
                 "split AFD MoE stage: A-side FP8 quant, route dispatch, wait, top-k combine, "
                 "and routed-output scaling; "

@@ -255,6 +255,9 @@ def persistent_psum_silu_mul_quant(
     alignment: int,
     topk_weights: torch.Tensor | None = None,
     group_size: int = 128,
+    activation_clamp: float | None = None,
+    activation_alpha: float = 1.0,
+    activation_up_bias: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] for DeepGEMM psum layout."""
     assert y.ndim == 2, "y must be (M, 2*H)"
@@ -266,6 +269,9 @@ def persistent_psum_silu_mul_quant(
         alignment=alignment,
         topk_weights=topk_weights,
         group_size=group_size,
+        activation_clamp=activation_clamp,
+        activation_alpha=activation_alpha,
+        activation_up_bias=activation_up_bias,
     )
 
 

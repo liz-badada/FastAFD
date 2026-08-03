@@ -3,6 +3,7 @@ set -euo pipefail
 
 workspace=${WORKSPACE:-/workspace}
 fastafd_root=${FASTAFD_ROOT:-${workspace}/FastAFD-megamoe-multimodel}
+sglang_python_root=${SGLANG_PYTHON_ROOT:-/sgl-workspace/sglang/python}
 results_dir=${RESULTS_DIR:-${workspace}/results/megamoe-colocated-multimodel}
 model=${MODEL:?set MODEL to an FP4 key from megamoe_model_profiles.py}
 ep_size=${EP_SIZE:-8}
@@ -10,17 +11,23 @@ tokens_per_rank=${TOKENS_PER_RANK:-64}
 mtp_nextn=${MTP_NEXTN:-0}
 layers=${LAYERS:-0}
 routing=${ROUTING:-balanced}
+backend=${BACKEND:-mega}
+weight_slots=${WEIGHT_SLOTS:-2}
 warmups=${WARMUPS:-5}
 iterations=${ITERATIONS:-30}
 
-mkdir -p "${workspace}/runtime_home" "${workspace}/cache/deepgemm-multimodel" "${results_dir}"
+mkdir -p \
+  "${workspace}/runtime_home" \
+  "${workspace}/cache/deepgemm-multimodel" \
+  "${results_dir}"
 export HOME="${workspace}/runtime_home"
 export XDG_CACHE_HOME="${workspace}/cache"
+export PYTHONUNBUFFERED=1
 export MINISGL_DEEPGEMM_BUILD_DIR="${workspace}/cache/deepgemm-multimodel"
-export PYTHONPATH="${workspace}/python_deps:${fastafd_root}/python"
+export PYTHONPATH="${workspace}/python_deps:${sglang_python_root}:${fastafd_root}/python${PYTHONPATH:+:${PYTHONPATH}}"
 export MEASUREMENT_CONTAINER_IMAGE=${MEASUREMENT_CONTAINER_IMAGE:-unknown}
 
-suffix="${model}_${ep_size}ep_t${tokens_per_rank}_n${mtp_nextn}_${routing}"
+suffix="${model}_${ep_size}ep_t${tokens_per_rank}_n${mtp_nextn}_${routing}_${backend}"
 torchrun --standalone --nproc-per-node="${ep_size}" \
   "${fastafd_root}/scripts/experiments/afd/benchmark_megamoe_colocated_models.py" \
   --model "${model}" \
@@ -30,5 +37,7 @@ torchrun --standalone --nproc-per-node="${ep_size}" \
   --mtp-nextn "${mtp_nextn}" \
   --layers "${layers}" \
   --routing "${routing}" \
+  --backend "${backend}" \
+  --weight-slots "${weight_slots}" \
   --warmups "${warmups}" \
   --iterations "${iterations}"

@@ -281,12 +281,15 @@ def psum_silu_mul_fp8_quant_cuda(
     alignment: int,
     topk_weights: torch.Tensor | None = None,
     group_size: int = 128,
+    activation_clamp: float | None = None,
+    activation_alpha: float = 1.0,
+    activation_up_bias: float = 0.0,
     manual_config: tuple[int, int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """MoE psum-layout silu+mul + FP8 (UE8M0 packed) quantization.
 
-    Computes y[m, h] = quantize_fp8(silu(x[m, :h]) * x[m, h:] * (topk if any))
-    with per-group=128 UE8M0 scales packed into int32 (DeepGEMM TMA layout).
+    Computes model-specific SwiGLU and optional top-k weighting, followed by
+    per-group UE8M0 FP8 quantization in the DeepGEMM TMA layout.
     Routes through the unified JIT kernel in
     `python/minisgl/kernel/csrc/jit/psum_silu_mul_fp8_packed.cu`, sharing the
     same (TPG, KX, RY) auto-dispatch family as per_token_cast_to_fp8_cuda.
@@ -301,10 +304,15 @@ def psum_silu_mul_fp8_quant_cuda(
     if h2 % 2 != 0:
         raise RuntimeError(f"last dim must be even, got {h2}")
     h = h2 // 2
-    if int(group_size) != 128:
-        raise RuntimeError(f"only group_size=128 supported, got {group_size}")
+    if int(group_size) not in (32, 128):
+        raise RuntimeError(f"group_size must be 32 or 128, got {group_size}")
     if h % group_size != 0:
         raise RuntimeError(f"hidden={h} must be divisible by group_size={group_size}")
+    if activation_alpha <= 0:
+        raise RuntimeError("activation_alpha must be positive")
+    clamp = float("inf") if activation_clamp is None else float(activation_clamp)
+    if clamp < 0:
+        raise RuntimeError("activation_clamp must be non-negative")
     packed_groups = _ceil_div(h // group_size, 4)
     if m == 0:
         return (
@@ -342,13 +350,34 @@ def psum_silu_mul_fp8_quant_cuda(
     if manual_config is not None:
         tpg, kx, ry = manual_config
         module.launch_manual(
-            x, y.view(torch.uint8), scales, psum, weights,
-            int(alignment), bool(apply_topk), int(tpg), int(kx), int(ry),
+            x,
+            y.view(torch.uint8),
+            scales,
+            psum,
+            weights,
+            int(alignment),
+            bool(apply_topk),
+            int(group_size),
+            clamp,
+            float(activation_alpha),
+            float(activation_up_bias),
+            int(tpg),
+            int(kx),
+            int(ry),
         )
     else:
         module.launch(
-            x, y.view(torch.uint8), scales, psum, weights,
-            int(alignment), bool(apply_topk),
+            x,
+            y.view(torch.uint8),
+            scales,
+            psum,
+            weights,
+            int(alignment),
+            bool(apply_topk),
+            int(group_size),
+            clamp,
+            float(activation_alpha),
+            float(activation_up_bias),
         )
     return y, scales
 

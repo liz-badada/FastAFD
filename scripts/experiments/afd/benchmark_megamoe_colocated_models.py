@@ -17,18 +17,21 @@ import os
 import platform
 import statistics
 import subprocess
+import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
 from minisgl.kernel import deepgemm
+from minisgl.kernel.deepgemm_fused_quant import persistent_psum_silu_mul_quant
 from minisgl.kernel.fp8_quant import (
     per_token_cast_to_fp8_cuda,
     per_token_cast_to_fp8_torch,
+    psum_silu_mul_fp8_quant_cuda,
 )
 from minisgl.kernel.megamoe_m2n_mega import cast_weights_to_fp4, transform_weights_for_mega_moe
 from minisgl.kernel.megamoe_mega import MegaMoESymmBuffer, fp8_fp4_mega_moe
@@ -37,6 +40,7 @@ from minisgl.moe.megamoe_model_profiles import (
     MegaMoEModelProfile,
     get_megamoe_model_profile,
 )
+from official_deepep_reference import OfficialDeepEPReference
 
 FP4_PROFILES = {
     key: profile
@@ -44,6 +48,26 @@ FP4_PROFILES = {
     if profile.weight_precision == "fp4"
 }
 INPUT_SEED_BASE = 0xAFD40000
+_RUNTIME_CLEANUPS: list[Callable[[], None]] = []
+
+
+@dataclass(frozen=True)
+class LayerWeights:
+    """One quantized weight set shared by MegaMoE and the reference path."""
+
+    baseline_l1: tuple[torch.Tensor, torch.Tensor]
+    baseline_l2: tuple[torch.Tensor, torch.Tensor]
+    mega_l1: tuple[torch.Tensor, torch.Tensor]
+    mega_l2: tuple[torch.Tensor, torch.Tensor]
+
+
+def cleanup_runtime_resources() -> None:
+    while _RUNTIME_CLEANUPS:
+        cleanup = _RUNTIME_CLEANUPS.pop()
+        try:
+            cleanup()
+        except Exception as exc:
+            print(f"runtime cleanup failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def utc_now() -> str:
@@ -220,7 +244,7 @@ def make_layer_weights(
     *,
     local_protocol_experts: int,
     layer_id: int,
-) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+) -> LayerWeights:
     value = 0.0625 if layer_id % 2 == 0 else 0.125
     l1 = torch.full(
         (local_protocol_experts, 2 * profile.intermediate_size, profile.hidden_size),
@@ -237,7 +261,13 @@ def make_layer_weights(
     l1_fp4 = cast_weights_to_fp4(l1)
     l2_fp4 = cast_weights_to_fp4(l2)
     del l1, l2
-    return transform_weights_for_mega_moe(l1_fp4, l2_fp4)
+    mega_l1, mega_l2 = transform_weights_for_mega_moe(l1_fp4, l2_fp4)
+    return LayerWeights(
+        baseline_l1=l1_fp4,
+        baseline_l2=l2_fp4,
+        mega_l1=mega_l1,
+        mega_l2=mega_l2,
+    )
 
 
 def validate_gran32_packed_quant(hidden_size: int, rank: int) -> dict[str, Any]:
@@ -282,31 +312,117 @@ def validate_gran32_packed_quant(hidden_size: int, rank: int) -> dict[str, Any]:
     return result
 
 
-def stage_once(
+def validate_model_activation_quant(
+    profile: MegaMoEModelProfile,
+    rank: int,
+) -> dict[str, Any]:
+    """Check the baseline activation/quant path against its Torch contract."""
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(0xA2C000 + rank)
+    rows = 7
+    values = torch.randn(
+        (rows, 2 * profile.intermediate_size),
+        dtype=torch.float32,
+        device="cuda",
+        generator=generator,
+    ).mul_(0.5)
+    x = values.to(torch.bfloat16).contiguous()
+    topk_weights = torch.linspace(0.2, 0.8, rows, dtype=torch.float32, device="cuda")
+    psum = torch.tensor([rows], dtype=torch.int32, device="cuda")
+    cuda_fp8, cuda_scales = psum_silu_mul_fp8_quant_cuda(
+        x,
+        psum,
+        alignment=1,
+        topk_weights=topk_weights,
+        group_size=32,
+        activation_clamp=profile.activation_clamp,
+        activation_alpha=profile.activation_alpha,
+        activation_up_bias=profile.activation_up_bias,
+    )
+
+    gate, up = x.float().chunk(2, dim=1)
+    if profile.activation_clamp is not None:
+        gate = gate.clamp(max=profile.activation_clamp)
+        up = up.clamp(min=-profile.activation_clamp, max=profile.activation_clamp)
+    activated = gate * torch.sigmoid(profile.activation_alpha * gate)
+    activated *= up + profile.activation_up_bias
+    activated *= topk_weights[:, None]
+    reference_fp8, reference_scales = per_token_cast_to_fp8_torch(
+        activated,
+        use_ue8m0=True,
+        gran_k=32,
+        use_packed_ue8m0=True,
+    )
+    fp8_mismatches = int(
+        (cuda_fp8.view(torch.uint8) != reference_fp8.view(torch.uint8)).sum().item()
+    )
+    scale_mismatches = int((cuda_scales != reference_scales).sum().item())
+    result = {
+        "contract": (
+            "CUDA psum model activation, top-k weighting and packed UE8M0 gran_k=32 "
+            "equal the Torch reference"
+        ),
+        "input_shape": list(x.shape),
+        "fp8_byte_mismatches": fp8_mismatches,
+        "packed_scale_mismatches": scale_mismatches,
+        "passed": fp8_mismatches == 0 and scale_mismatches == 0,
+    }
+    del (
+        values,
+        x,
+        topk_weights,
+        psum,
+        cuda_fp8,
+        cuda_scales,
+        gate,
+        up,
+        activated,
+        reference_fp8,
+        reference_scales,
+    )
+    return result
+
+
+def expand_block128_scales_for_block32(scales: torch.Tensor) -> torch.Tensor:
+    """Repeat each packed block-128 UE8M0 scale for four block-32 groups."""
+    rows = int(scales.shape[0])
+    scale_bytes = scales.contiguous().view(torch.uint8).reshape(rows, -1)
+    expanded = scale_bytes.repeat_interleave(4, dim=1).contiguous()
+    return expanded.view(torch.int32)
+
+
+def mega_stage_once(
     *,
     profile: MegaMoEModelProfile,
     buffer: MegaMoESymmBuffer,
-    weights: list[tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]],
+    weights: list[LayerWeights],
+    layers: int,
     hidden: torch.Tensor,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     output: torch.Tensor,
-) -> None:
-    for l1_weights, l2_weights in weights:
+    input_quant_granularity: int = 32,
+) -> torch.Tensor:
+    for layer_id in range(layers):
+        layer = weights[layer_id % len(weights)]
         x_fp8, x_sf = deepgemm.per_token_cast_to_fp8(
             hidden,
             use_ue8m0=True,
-            gran_k=32,
+            gran_k=input_quant_granularity,
             use_packed_ue8m0=True,
         )
+        if input_quant_granularity == 128:
+            x_sf = expand_block128_scales_for_block32(x_sf)
+        elif input_quant_granularity != 32:
+            raise ValueError("MegaMoE input quantization must use block-32 or block-128")
         buffer.x[: hidden.shape[0]].copy_(x_fp8)
         buffer.x_sf[: hidden.shape[0]].copy_(x_sf)
         buffer.topk_idx[: hidden.shape[0]].copy_(topk_ids)
         buffer.topk_weights[: hidden.shape[0]].copy_(topk_weights)
         fp8_fp4_mega_moe(
             output,
-            l1_weights,
-            l2_weights,
+            layer.mega_l1,
+            layer.mega_l2,
             buffer,
             activation_clamp=profile.activation_clamp,
             activation_alpha=profile.activation_alpha,
@@ -315,6 +431,93 @@ def stage_once(
         )
         if profile.routed_scaling_factor != 1.0:
             output.mul_(profile.routed_scaling_factor)
+    return output
+
+
+def deepep_stage_once(
+    *,
+    profile: MegaMoEModelProfile,
+    buffer: OfficialDeepEPReference,
+    weights: list[LayerWeights],
+    layers: int,
+    hidden: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    expert_alignment: int,
+    weight_before_l2_quant: bool = False,
+) -> torch.Tensor:
+    output = hidden
+    for layer_id in range(layers):
+        layer = weights[layer_id % len(weights)]
+        x_fp8, x_sf = deepgemm.per_token_cast_to_fp8(
+            hidden,
+            use_ue8m0=True,
+            gran_k=128,
+            use_packed_ue8m0=True,
+        )
+        dispatch = buffer.dispatch_and_scatter(
+            x_fp8,
+            x_sf,
+            topk_ids,
+            topk_weights,
+        )
+        recv_tokens = int(dispatch.hidden_states.shape[0])
+        l1_output = torch.empty(
+            (recv_tokens, 2 * profile.intermediate_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        deepgemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (dispatch.hidden_states, dispatch.hidden_states_scale),
+            layer.baseline_l1,
+            l1_output,
+            dispatch.m_indices,
+            recipe_a=(1, 128),
+            recipe_b=(1, 32),
+            disable_ue8m0_cast=False,
+        )
+        expert_weights = None
+        gather_weights = None
+        if weight_before_l2_quant:
+            valid = dispatch.output_index >= 0
+            expert_weights = torch.ones(
+                recv_tokens,
+                dtype=torch.float32,
+                device=dispatch.output_index.device,
+            )
+            expert_weights[dispatch.output_index[valid].long()] = dispatch.topk_weights[valid]
+            gather_weights = torch.ones_like(dispatch.topk_weights)
+        l2_input, l2_input_sf = persistent_psum_silu_mul_quant(
+            l1_output,
+            dispatch.psum_tokens_per_expert,
+            alignment=expert_alignment,
+            topk_weights=expert_weights,
+            group_size=32,
+            activation_clamp=profile.activation_clamp,
+            activation_alpha=profile.activation_alpha,
+            activation_up_bias=profile.activation_up_bias,
+        )
+        l2_output = torch.empty(
+            (recv_tokens, profile.hidden_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        deepgemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (l2_input, l2_input_sf),
+            layer.baseline_l2,
+            l2_output,
+            dispatch.m_indices,
+            recipe=(1, 1, 32),
+            disable_ue8m0_cast=False,
+        )
+        output = buffer.gather_and_combine(
+            l2_output,
+            dispatch,
+            topk_weights=gather_weights,
+        )
+        if profile.routed_scaling_factor != 1.0:
+            output.mul_(profile.routed_scaling_factor)
+    return output
 
 
 def main() -> None:
@@ -327,6 +530,18 @@ def main() -> None:
     parser.add_argument("--layers", type=int, default=0, help="0 means all model MoE layers")
     parser.add_argument("--routing", choices=("balanced", "hotset"), default="balanced")
     parser.add_argument("--hot-expert-fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--backend",
+        choices=("mega", "deepep", "both"),
+        default="mega",
+        help="Measure FastAFD MegaMoE, official DeepEP+DeepGEMM, or both",
+    )
+    parser.add_argument(
+        "--weight-slots",
+        type=int,
+        default=2,
+        help="Number of deterministic weight sets to allocate and cycle across layers",
+    )
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
     args = parser.parse_args()
@@ -344,6 +559,8 @@ def main() -> None:
         raise SystemExit("mtp-nextn must be non-negative")
     if not 0 < args.hot_expert_fraction <= 1:
         raise SystemExit("hot-expert-fraction must be in (0, 1]")
+    if args.weight_slots < 1:
+        raise SystemExit("weight-slots must be positive")
     if args.warmups < 1 or args.iterations < 3:
         raise SystemExit("warmups must be >=1 and iterations must be >=3")
 
@@ -354,28 +571,55 @@ def main() -> None:
         raise SystemExit(f"WORLD_SIZE={world_size}, expected ep_size={args.ep_size}")
     torch.cuda.set_device(local_rank)
     dist.init_process_group("nccl", device_id=torch.device("cuda", local_rank))
+    _RUNTIME_CLEANUPS.append(dist.destroy_process_group)
 
     quant_validation = validate_gran32_packed_quant(profile.hidden_size, rank)
-    quant_passed = torch.tensor(int(quant_validation["passed"]), dtype=torch.int32, device="cuda")
+    activation_validation = validate_model_activation_quant(profile, rank)
+    quant_passed = torch.tensor(
+        int(quant_validation["passed"] and activation_validation["passed"]),
+        dtype=torch.int32,
+        device="cuda",
+    )
     dist.all_reduce(quant_passed, op=dist.ReduceOp.MIN)
     if not bool(quant_passed.item()):
         raise RuntimeError(
             "packed gran_k=32 FP8 quantization does not match the Torch reference; "
-            f"rank {rank}: {quant_validation}"
+            f"rank {rank}: input={quant_validation}; activation={activation_validation}"
         )
 
     verify_width = args.mtp_nextn + 1
     physical_tokens = args.tokens_per_rank * verify_width
     local_routed, protocol_experts, protocol_topk = protocol_shape(profile, args.ep_size)
     local_protocol = protocol_experts // args.ep_size
-    buffer = MegaMoESymmBuffer(
-        dist.group.WORLD,
-        num_experts=protocol_experts,
-        num_max_tokens_per_rank=physical_tokens,
-        num_topk=protocol_topk,
-        hidden=profile.hidden_size,
-        intermediate_hidden=profile.intermediate_size,
+    enabled_backends = ("mega", "deepep") if args.backend == "both" else (args.backend,)
+    mega_buffer = (
+        MegaMoESymmBuffer(
+            dist.group.WORLD,
+            num_experts=protocol_experts,
+            num_max_tokens_per_rank=physical_tokens,
+            num_topk=protocol_topk,
+            hidden=profile.hidden_size,
+            intermediate_hidden=profile.intermediate_size,
+        )
+        if "mega" in enabled_backends
+        else None
     )
+    if mega_buffer is not None:
+        _RUNTIME_CLEANUPS.append(mega_buffer.destroy)
+    expert_alignment = 128
+    deepgemm.set_mk_alignment_for_contiguous_layout(expert_alignment)
+    deepep_buffer = (
+        OfficialDeepEPReference(
+            group=dist.group.WORLD,
+            hidden_size=profile.hidden_size,
+            num_experts=protocol_experts,
+            expert_alignment=expert_alignment,
+        )
+        if "deepep" in enabled_backends
+        else None
+    )
+    if deepep_buffer is not None:
+        _RUNTIME_CLEANUPS.append(deepep_buffer.destroy)
     topk_ids, topk_weights, route_counts = make_protocol_routes(
         profile,
         physical_tokens,
@@ -398,12 +642,13 @@ def main() -> None:
         .mul_(0.375)
         .to(torch.bfloat16)
     )
-    output = torch.empty_like(hidden)
+    mega_output = torch.empty_like(hidden)
 
     torch.cuda.reset_peak_memory_stats()
     init_start = time.perf_counter()
-    weights = []
-    for layer_id in range(layers):
+    weight_slots = min(layers, args.weight_slots)
+    weights: list[LayerWeights] = []
+    for layer_id in range(weight_slots):
         weights.append(
             make_layer_weights(
                 profile,
@@ -418,63 +663,114 @@ def main() -> None:
     initialization_seconds = time.perf_counter() - init_start
     peak_memory_bytes = torch.cuda.max_memory_allocated()
 
-    for _ in range(args.warmups):
-        dist.barrier()
-        stage_once(
+    def run_backend(name: str, *, correctness_mode: bool = False) -> torch.Tensor:
+        if name == "mega":
+            assert mega_buffer is not None
+            return mega_stage_once(
+                profile=profile,
+                buffer=mega_buffer,
+                weights=weights,
+                layers=layers,
+                hidden=hidden,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                output=mega_output,
+                input_quant_granularity=128 if correctness_mode else 32,
+            )
+        assert name == "deepep" and deepep_buffer is not None
+        return deepep_stage_once(
             profile=profile,
-            buffer=buffer,
+            buffer=deepep_buffer,
             weights=weights,
+            layers=layers,
             hidden=hidden,
             topk_ids=topk_ids,
             topk_weights=topk_weights,
-            output=output,
+            expert_alignment=expert_alignment,
+            weight_before_l2_quant=correctness_mode,
         )
+
+    correctness: dict[str, Any] | None = None
+    if args.backend == "both":
+        dist.barrier()
+        mega_reference = run_backend("mega", correctness_mode=True).clone()
         torch.cuda.synchronize()
-
-    local_cuda: list[float] = []
-    local_wall: list[float] = []
-    gathered_iterations: list[list[dict[str, float]]] = []
-    for _ in range(args.iterations):
         dist.barrier()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        wall_start = time.perf_counter()
-        stage_once(
-            profile=profile,
-            buffer=buffer,
-            weights=weights,
-            hidden=hidden,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            output=output,
+        deepep_reference = run_backend("deepep", correctness_mode=True)
+        torch.cuda.synchronize()
+        difference = mega_reference.float() - deepep_reference.float()
+        reference_norm = float(torch.linalg.vector_norm(deepep_reference.float()).item())
+        relative_l2 = float(torch.linalg.vector_norm(difference).item()) / max(
+            reference_norm, 1e-12
         )
-        end.record()
-        end.synchronize()
-        cuda_ms = float(start.elapsed_time(end))
-        wall_ms = (time.perf_counter() - wall_start) * 1000.0
-        local_cuda.append(cuda_ms)
-        local_wall.append(wall_ms)
-        gathered = [None] * world_size if rank == 0 else None
-        dist.gather_object(
-            {"cuda_ms": cuda_ms, "wall_ms": wall_ms},
-            object_gather_list=gathered,
-            dst=0,
-        )
-        if rank == 0:
-            assert gathered is not None
-            gathered_iterations.append(gathered)
+        correctness = {
+            "contract": (
+                "MegaMoE and official DeepEP+DeepGEMM use identical block-128 FP8 "
+                "inputs, routes, FP4 weights, model activation and pre-L2 top-k weighting "
+                "for the numerical check; timed paths retain their production contracts"
+            ),
+            "exact": bool(torch.equal(mega_reference, deepep_reference)),
+            "max_abs_error": float(difference.abs().max().item()),
+            "mean_abs_error": float(difference.abs().mean().item()),
+            "relative_l2_error": relative_l2,
+            "threshold_relative_l2": 1e-3,
+            "passed": bool(relative_l2 <= 1e-3),
+        }
+        del mega_reference, deepep_reference, difference
 
-    finite = bool(torch.isfinite(output).all().item())
-    output_abs_mean = float(output.float().abs().mean().item())
-    finite_all = [None] * world_size if rank == 0 else None
-    output_means = [None] * world_size if rank == 0 else None
+    output_by_backend: dict[str, torch.Tensor] = {}
+    for name in enabled_backends:
+        for _ in range(args.warmups):
+            dist.barrier()
+            output_by_backend[name] = run_backend(name)
+            torch.cuda.synchronize()
+
+    gathered_iterations: dict[str, list[list[dict[str, float]]]] = {
+        name: [] for name in enabled_backends
+    }
+    for iteration in range(args.iterations):
+        order = enabled_backends if iteration % 2 == 0 else tuple(reversed(enabled_backends))
+        for name in order:
+            dist.barrier()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            wall_start = time.perf_counter()
+            output_by_backend[name] = run_backend(name)
+            end.record()
+            end.synchronize()
+            cuda_ms = float(start.elapsed_time(end))
+            wall_ms = (time.perf_counter() - wall_start) * 1000.0
+            gathered = [None] * world_size if rank == 0 else None
+            dist.gather_object(
+                {"cuda_ms": cuda_ms, "wall_ms": wall_ms},
+                object_gather_list=gathered,
+                dst=0,
+            )
+            if rank == 0:
+                assert gathered is not None
+                gathered_iterations[name].append(gathered)
+
+    local_output_quality = {
+        name: {
+            "finite": bool(torch.isfinite(output).all().item()),
+            "abs_mean": float(output.float().abs().mean().item()),
+        }
+        for name, output in output_by_backend.items()
+    }
+    output_quality_by_rank = [None] * world_size if rank == 0 else None
+    correctness_by_rank = [None] * world_size if rank == 0 else None
     init_times = [None] * world_size if rank == 0 else None
     peak_memories = [None] * world_size if rank == 0 else None
     provenance = [None] * world_size if rank == 0 else None
     quant_validations = [None] * world_size if rank == 0 else None
-    dist.gather_object(finite, object_gather_list=finite_all, dst=0)
-    dist.gather_object(output_abs_mean, object_gather_list=output_means, dst=0)
+    activation_validations = [None] * world_size if rank == 0 else None
+    dist.gather_object(
+        local_output_quality,
+        object_gather_list=output_quality_by_rank,
+        dst=0,
+    )
+    dist.gather_object(correctness, object_gather_list=correctness_by_rank, dst=0)
     dist.gather_object(initialization_seconds, object_gather_list=init_times, dst=0)
     dist.gather_object(peak_memory_bytes, object_gather_list=peak_memories, dst=0)
     dist.gather_object(gpu_provenance(local_rank), object_gather_list=provenance, dst=0)
@@ -483,21 +779,69 @@ def main() -> None:
         object_gather_list=quant_validations,
         dst=0,
     )
+    dist.gather_object(
+        activation_validation,
+        object_gather_list=activation_validations,
+        dst=0,
+    )
 
     if rank == 0:
-        stage_cuda = [max(sample["cuda_ms"] for sample in rows) for rows in gathered_iterations]
-        stage_wall = [max(sample["wall_ms"] for sample in rows) for rows in gathered_iterations]
-        stage_summary = summarize(stage_cuda)
+        assert output_quality_by_rank is not None
+        backend_results: dict[str, Any] = {}
+        for name in enabled_backends:
+            stage_cuda = [
+                max(sample["cuda_ms"] for sample in rows) for rows in gathered_iterations[name]
+            ]
+            stage_wall = [
+                max(sample["wall_ms"] for sample in rows) for rows in gathered_iterations[name]
+            ]
+            stage_summary = summarize(stage_cuda)
+            finite_by_rank = [item[name]["finite"] for item in output_quality_by_rank]
+            backend_results[name] = {
+                "stage_cuda": stage_summary,
+                "stage_wall": summarize(stage_wall),
+                "stage_cuda_samples_ms": stage_cuda,
+                "stage_wall_samples_ms": stage_wall,
+                "rank_cuda_samples_ms": [
+                    [sample["cuda_ms"] for sample in rows] for rows in gathered_iterations[name]
+                ],
+                "rank_wall_samples_ms": [
+                    [sample["wall_ms"] for sample in rows] for rows in gathered_iterations[name]
+                ],
+                "all_outputs_finite_by_rank": finite_by_rank,
+                "output_abs_mean_by_rank": [
+                    item[name]["abs_mean"] for item in output_quality_by_rank
+                ],
+                "stable": bool(stage_summary["cv_percent"] <= 3.0 and all(finite_by_rank)),
+            }
+        primary_backend = "mega" if "mega" in backend_results else "deepep"
+        primary = backend_results[primary_backend]
+        speedup = None
+        if args.backend == "both":
+            speedup = (
+                backend_results["deepep"]["stage_cuda"]["p50_ms"]
+                / backend_results["mega"]["stage_cuda"]["p50_ms"]
+            )
+        correctness_passed = (
+            None
+            if args.backend != "both"
+            else all(item is not None and item["passed"] for item in correctness_by_rank)
+        )
         payload = {
-            "schema": "fastafd.megamoe-colocated-model-benchmark.v1",
+            "schema": "fastafd.megamoe-colocated-model-benchmark.v2",
             "generated_at": utc_now(),
+            "system_label": os.environ.get("MEASUREMENT_SYSTEM", "unspecified"),
             "measurement_boundary": (
-                "colocated MoE stage: per-token FP8 quantization and symmetric-buffer staging, "
-                "fused expert-parallel dispatch, FP8xFP4 L1, model-specific activation, "
-                "requant, L2 and combine, plus routed-output scaling; includes the replicated "
-                "shared expert through an explicit per-source protocol route when declared; "
-                "excludes router, attention, dense-only layers, residual, sampling and scheduler"
+                "colocated MoE stage with identical input, route, FP8xFP4 weights and "
+                "model-specific activation contract: FastAFD MegaMoE fuses dispatch, L1, "
+                "activation/requant, L2 and combine; the reference executes official DeepEP "
+                "normal dispatch/combine, SGLang scatter/gather and two contiguous DeepGEMM "
+                "GEMMs. Both include input FP8 quantization, "
+                "routed-output scaling and the declared replicated shared-expert protocol route. "
+                "Router, attention, dense-only layers, residual, sampling and scheduler are excluded."
             ),
+            "selected_backends": list(enabled_backends),
+            "primary_backend": primary_backend,
             "model_profile": asdict(profile),
             "topology": {
                 "world_size": world_size,
@@ -521,6 +865,11 @@ def main() -> None:
                     "verified candidates into useful output tokens"
                 ),
                 "layers": layers,
+                "weight_slots": weight_slots,
+                "weight_reuse_note": (
+                    "deterministic quantized weight slots are cycled across shape-identical MoE "
+                    "layers; values do not change the kernel schedule or transferred byte count"
+                ),
                 "routing": args.routing,
                 "hot_expert_fraction": args.hot_expert_fraction,
                 "routing_load": route_summary(route_counts.cpu()),
@@ -534,34 +883,55 @@ def main() -> None:
             },
             "warmups": args.warmups,
             "iterations": args.iterations,
-            "stage_cuda": stage_summary,
-            "stage_wall": summarize(stage_wall),
-            "stage_cuda_samples_ms": stage_cuda,
-            "stage_wall_samples_ms": stage_wall,
-            "rank_cuda_samples_ms": [
-                [sample["cuda_ms"] for sample in rows] for rows in gathered_iterations
-            ],
-            "rank_wall_samples_ms": [
-                [sample["wall_ms"] for sample in rows] for rows in gathered_iterations
-            ],
-            "all_outputs_finite_by_rank": finite_all,
-            "output_abs_mean_by_rank": output_means,
-            "stable": bool(stage_summary["cv_percent"] <= 3.0 and all(finite_all)),
+            "backend_results": backend_results,
+            "speedup_deepep_over_megamoe": speedup,
+            "deepep_backend": (deepep_buffer.metadata() if deepep_buffer is not None else None),
+            "correctness_by_rank": correctness_by_rank,
+            "correctness_passed": correctness_passed,
+            "eligible_for_profile": bool(
+                all(result["stable"] for result in backend_results.values())
+                and correctness_passed is not False
+                and speedup is not None
+                and speedup > 1.0
+            ),
+            "stage_cuda": primary["stage_cuda"],
+            "stage_wall": primary["stage_wall"],
+            "stage_cuda_samples_ms": primary["stage_cuda_samples_ms"],
+            "stage_wall_samples_ms": primary["stage_wall_samples_ms"],
+            "rank_cuda_samples_ms": primary["rank_cuda_samples_ms"],
+            "rank_wall_samples_ms": primary["rank_wall_samples_ms"],
+            "all_outputs_finite_by_rank": primary["all_outputs_finite_by_rank"],
+            "output_abs_mean_by_rank": primary["output_abs_mean_by_rank"],
+            "stable": primary["stable"],
             "stability_contract": "stage CUDA CV <= 3% and finite output on every rank",
             "initialization_seconds_by_rank": init_times,
             "peak_cuda_memory_bytes_by_rank": peak_memories,
             "quantization_validation_by_rank": quant_validations,
+            "activation_quant_validation_by_rank": activation_validations,
             "source": source_provenance(),
             "provenance_by_rank": provenance,
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps({"output": str(args.output), "stage_cuda": stage_summary}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "output": str(args.output),
+                    "backend_results": {
+                        name: result["stage_cuda"] for name, result in backend_results.items()
+                    },
+                    "speedup_deepep_over_megamoe": speedup,
+                    "correctness_passed": correctness_passed,
+                },
+                indent=2,
+            )
+        )
 
     dist.barrier()
-    buffer.destroy()
-    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        cleanup_runtime_resources()

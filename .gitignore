@@ -20,6 +20,7 @@ build/
 dist/
 *.tar.gz
 cache/
+slurm-*.out
 
 # virtual environment
 .venv/

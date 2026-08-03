@@ -7,10 +7,12 @@ export EP_SIZE=${EP_SIZE:-8}
 export TOKENS_PER_RANK=${TOKENS_PER_RANK:-16}
 export MTP_NEXTN=${MTP_NEXTN:-0}
 export LAYERS=${LAYERS:-1}
+export BACKEND=${BACKEND:-both}
+export WEIGHT_SLOTS=${WEIGHT_SLOTS:-1}
 export WARMUPS=${WARMUPS:-2}
 export ITERATIONS=${ITERATIONS:-10}
 
-for model in qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 \
-  deepseek_v4_flash_fp4 deepseek_v4_pro_fp4; do
+read -r -a models <<< "${MODELS:-qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 deepseek_v4_flash_fp4 deepseek_v4_pro_fp4}"
+for model in "${models[@]}"; do
   MODEL=${model} "${runner}"
 done
