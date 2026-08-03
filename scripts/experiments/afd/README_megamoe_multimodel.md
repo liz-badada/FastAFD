@@ -132,6 +132,13 @@ name.
    | `megamoe_latency_reference.md` | Compact human-readable latency and qualification table. |
    | `afd_moe_stage_profile.json` | Validated exact-match timing input for AIC. |
 
+   The selected B200 reference set is committed at
+   `scripts/experiments/afd/reference/b200_sxm/`: 40 colocated validation
+   points, 120 split-stage points, the generated Markdown table, and the
+   exact-only profile. All 160 entries pass their applicable qualification
+   gates. This profile is labeled `b200_sxm` and is intentionally rejected by
+   a GB200 sweep.
+
    Add `--csv /path/to/megamoe_latency_reference.csv` only when a separate
    machine-readable table is needed.
 
