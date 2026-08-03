@@ -248,6 +248,11 @@ RESULTS_DIR=/workspace/results/megamoe-colocated \
 sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 ```
 
+`SOURCE_ROOT` defaults to the Slurm submission directory, and `HOST_ROOT`
+defaults to its parent. Set `CONTAINER_IMAGE` to the local path of the SGLang
+Blackwell image when the site does not provide the default image path. The
+parent mount makes `/workspace/results/...` persistent beside the checkout.
+
 Set `MEASUREMENT_SYSTEM` to the AIC system key represented by the allocation.
 The submit script defaults to an 8-GPU B200 allocation and labels it
 `b200_sxm`. It requests the whole node exclusively so CPU or memory co-tenants
