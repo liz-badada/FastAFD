@@ -187,8 +187,22 @@ sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 ```
 
 Set `MEASUREMENT_SYSTEM` to the AIC system key represented by the allocation.
-The B200 submit script defaults it to `b200_sxm`; a GB200/NVL72 submission must set
-`MEASUREMENT_SYSTEM=gb200` and use the corresponding partition and GPU count.
+The submit script defaults to an 8-GPU B200 allocation and labels it
+`b200_sxm`. For a single-node GB200 NVL72 split measurement, override the
+Slurm resources, set the exact A:F topology, and label the result `gb200`:
+
+```bash
+SOURCE_ROOT=/path/to/FastAFD \
+RUN_SCRIPT=run_megamoe_m2n_model_benchmark.sh \
+MEASUREMENT_SYSTEM=gb200 TOTAL_GPUS=72 \
+MODEL=qwen3_235b_fp4 AG_SIZE=56 EG_SIZE=16 \
+SEQUENCES_PER_AG_RANK=96 MTP_NEXTN=3 MICROBATCHES=2 \
+sbatch --partition=GB200_NVL72_PARTITION --gpus=72 \
+  scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+```
+
+`TOTAL_GPUS` controls the nested `srun`; it must match the Slurm allocation and
+`AG_SIZE + EG_SIZE`. Do not label an 8-GPU B200 result as `gb200`.
 
 ## Acceptance gates
 

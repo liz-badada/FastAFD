@@ -56,6 +56,11 @@ source_tree_sha256=$(
     sha256sum |
     cut -d' ' -f1
 )
+allocation_gpus=${TOTAL_GPUS:-${SLURM_GPUS_ON_NODE:-8}}
+if [[ ! ${allocation_gpus} =~ ^[1-9][0-9]*$ ]]; then
+  echo "TOTAL_GPUS or SLURM_GPUS_ON_NODE must be a positive integer: ${allocation_gpus}" >&2
+  exit 2
+fi
 mounts="${host_root}:/workspace"
 if [[ -d /home/scratch.jinyanc_wwfo/cargo ]]; then
   mounts+=",/home/scratch.jinyanc_wwfo/cargo:/home/scratch.jinyanc_wwfo/cargo:ro"
@@ -66,7 +71,7 @@ fi
 
 srun \
   --ntasks=1 \
-  --gpus=8 \
+  --gpus="${allocation_gpus}" \
   --container-image="${image}" \
   --no-container-entrypoint \
   --container-mounts="${mounts}" \
