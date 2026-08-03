@@ -184,6 +184,12 @@ bash scripts/experiments/afd/run_megamoe_colocated_model_benchmark.sh
 The scripts execute `logical_count * (MTP_NEXTN + 1)` physical verification
 tokens. MTP acceptance is intentionally not applied to kernel latency.
 
+For an AIC AGG candidate, set `TOKENS_PER_RANK` to
+`agg_local_batch / attention_tp`, not to the cluster concurrency or the
+per-replica batch directly. The division must be integral for an exact measured
+profile. For AFD, `SEQUENCES_PER_AG_RANK` maps directly to AIC's
+`batch_per_a_gpu`.
+
 On the configured ComputeLab B200 partition, submit either runner through:
 
 ```bash
