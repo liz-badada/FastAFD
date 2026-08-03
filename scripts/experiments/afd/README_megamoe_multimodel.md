@@ -50,7 +50,10 @@ name.
 
 1. Run the one-layer, low-batch smoke suite. This checks compilation, all-rank
    finite outputs, quantization, and the colocated numerical reference before
-   allocating time to a full sweep.
+   allocating time to a full sweep. The matched numerical gate requires every
+   output to be finite and the two BF16 backend outputs to differ by no more
+   than one representable BF16 value (one ULP) elementwise. Relative L2 is
+   retained in the JSON as a diagnostic and is not used to hide BF16 rounding.
 
    ```bash
    SOURCE_ROOT=/path/to/FastAFD \

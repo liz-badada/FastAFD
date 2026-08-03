@@ -99,6 +99,15 @@ def summarize(values: list[float]) -> dict[str, float | int]:
     }
 
 
+def bf16_ordered_codes(values: torch.Tensor) -> torch.Tensor:
+    """Map finite BF16 values to monotonic integer codes for ULP comparison."""
+    if values.dtype != torch.bfloat16:
+        raise ValueError(f"expected torch.bfloat16, got {values.dtype}")
+    bits = values.contiguous().view(torch.int16).to(torch.int32) & 0xFFFF
+    magnitude = bits & 0x7FFF
+    return torch.where((bits & 0x8000) != 0, 0x8000 - magnitude, 0x8000 + magnitude)
+
+
 def command_output(command: list[str], *, cwd: Path | None = None) -> str:
     try:
         return subprocess.check_output(
@@ -704,6 +713,15 @@ def main() -> None:
         deepep_reference = run_backend("deepep", correctness_mode=True)
         torch.cuda.synchronize()
         difference = mega_reference.float() - deepep_reference.float()
+        finite = bool(
+            torch.isfinite(mega_reference).all().item()
+            and torch.isfinite(deepep_reference).all().item()
+        )
+        ulp_difference = (
+            bf16_ordered_codes(mega_reference)
+            - bf16_ordered_codes(deepep_reference)
+        ).abs()
+        max_bf16_ulp_error = int(ulp_difference.max().item())
         reference_norm = float(torch.linalg.vector_norm(deepep_reference.float()).item())
         relative_l2 = float(torch.linalg.vector_norm(difference).item()) / max(
             reference_norm, 1e-12
@@ -719,6 +737,7 @@ def main() -> None:
                     "row": row_idx,
                     "max_abs_error": float(row_difference.max().item()),
                     "mean_abs_error": float(row_difference.mean().item()),
+                    "max_bf16_ulp_error": int(ulp_difference[row_idx].max().item()),
                     "mega_abs_mean": float(mega_reference[row_idx].float().abs().mean().item()),
                     "deepep_abs_mean": float(
                         deepep_reference[row_idx].float().abs().mean().item()
@@ -740,10 +759,14 @@ def main() -> None:
             "relative_l2_error": relative_l2,
             "rows_with_nonzero_error": int(differing_rows.numel()),
             "first_differing_rows": row_diagnostics,
-            "threshold_relative_l2": 1e-3,
-            "passed": bool(relative_l2 <= 1e-3),
+            "all_outputs_finite": finite,
+            "max_bf16_ulp_error": max_bf16_ulp_error,
+            "threshold_bf16_ulp": 1,
+            "legacy_diagnostic_threshold_relative_l2": 1e-3,
+            "passed_contract": "all outputs finite and every BF16 value differs by at most 1 ULP",
+            "passed": bool(finite and max_bf16_ulp_error <= 1),
         }
-        del mega_reference, deepep_reference, difference
+        del mega_reference, deepep_reference, difference, ulp_difference
 
     output_by_backend: dict[str, torch.Tensor] = {}
     for warmup in range(args.warmups):
