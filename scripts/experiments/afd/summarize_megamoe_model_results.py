@@ -21,6 +21,12 @@ class ResultRow:
     stage: str
     model: str
     model_path: str
+    hidden_size: int
+    intermediate_size: int
+    routed_experts: int
+    routed_top_k: int
+    shared_experts: int
+    activation: str
     precision: str
     system: str
     topology: str
@@ -80,6 +86,12 @@ def parse_result(path: Path) -> ResultRow | None:
             stage="agg",
             model=str(profile["key"]),
             model_path=str(profile["simulation_model_path"]),
+            hidden_size=int(profile["hidden_size"]),
+            intermediate_size=int(profile["intermediate_size"]),
+            routed_experts=int(profile["num_routed_experts"]),
+            routed_top_k=int(profile["routed_top_k"]),
+            shared_experts=int(profile["num_shared_experts"]),
+            activation=str(profile["activation"]),
             precision=str(profile.get("moe_quant_contract", profile["weight_precision"])),
             system=str(payload.get("system_label", "unspecified")),
             topology=f"ep{ep_size}",
@@ -120,6 +132,12 @@ def parse_result(path: Path) -> ResultRow | None:
         stage="afd",
         model=str(profile["key"]),
         model_path=str(profile["simulation_model_path"]),
+        hidden_size=int(profile["hidden_size"]),
+        intermediate_size=int(profile["intermediate_size"]),
+        routed_experts=int(profile["num_routed_experts"]),
+        routed_top_k=int(profile["routed_top_k"]),
+        shared_experts=int(profile["num_shared_experts"]),
+        activation=str(profile["activation"]),
         precision=str(profile.get("moe_quant_contract", profile["weight_precision"])),
         system=str(payload.get("system_label", "unspecified")),
         topology=f"{ag_size}A{eg_size}F",
@@ -239,9 +257,35 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "",
         "The speedup columns compare complete colocated MoE-stage backend paths, including production quantization, dispatch/combine, expert alignment, scatter/gather, and GEMMs. They are not GEMM-only or end-to-end serving speedups. The AIC profile consumes the absolute MegaMoE latency.",
         "",
-        "| " + " | ".join(columns) + " |",
-        "| " + " | ".join("---" for _ in columns) + " |",
+        "## Model contracts",
+        "",
+        "| model | hidden | expert intermediate | routed experts | routed top-k | shared experts | activation | precision |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
+    contracts = {
+        (
+            row.model,
+            row.hidden_size,
+            row.intermediate_size,
+            row.routed_experts,
+            row.routed_top_k,
+            row.shared_experts,
+            row.activation,
+            row.precision,
+        )
+        for row in rows
+    }
+    for contract in sorted(contracts):
+        lines.append("| " + " | ".join(format_value(value) for value in contract) + " |")
+    lines.extend(
+        [
+            "",
+            "## Exact measured points",
+            "",
+            "| " + " | ".join(columns) + " |",
+            "| " + " | ".join("---" for _ in columns) + " |",
+        ]
+    )
     for row in rows:
         values = {
             key: row.logical_batch * (row.mtp_nextn + 1)
