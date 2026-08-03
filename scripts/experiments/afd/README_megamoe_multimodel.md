@@ -92,6 +92,11 @@ expert count, routing scale, and activation contract are defined in
    ```bash
    git clone --branch afd-moe-timing \
      git@github.com:liz-badada/dynamo.git
+   cd dynamo
+   uv sync --extra mocker
+   source .venv/bin/activate
+   uv pip install 'maturin[patchelf]'
+   (cd lib/bindings/python && maturin develop --uv)
    cd /path/to/aiconfigurator
    uv run python tools/afd_multimodel_mtp_mocker_replay.py \
      --sweep /path/to/measured_sweep.json \
