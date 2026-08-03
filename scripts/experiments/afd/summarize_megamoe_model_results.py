@@ -30,6 +30,7 @@ class ResultRow:
     layers: int
     mega_p50_ms: float
     reference_p50_ms: float | None
+    reference_stack: str | None
     speedup: float | None
     speedup_lower_bound: float | None
     mega_cv_percent: float
@@ -72,6 +73,7 @@ def parse_result(path: Path) -> ResultRow | None:
             return None
         mega = backends["mega"]
         reference = backends.get("deepep")
+        reference_metadata = payload.get("deepep_backend") or {}
         ep_size = int(topology["ep_size"])
         return ResultRow(
             path=str(path),
@@ -88,6 +90,14 @@ def parse_result(path: Path) -> ResultRow | None:
             mega_p50_ms=float(mega["stage_cuda"]["p50_ms"]),
             reference_p50_ms=(
                 None if reference is None else float(reference["stage_cuda"]["p50_ms"])
+            ),
+            reference_stack=(
+                None
+                if reference is None
+                else (
+                    f"DeepEP {reference_metadata.get('deep_ep_version', 'unknown')} / "
+                    f"SGLang {reference_metadata.get('sglang_version', 'unknown')}"
+                )
             ),
             speedup=_float(payload.get("speedup_deepep_over_megamoe")),
             speedup_lower_bound=_float(payload.get("speedup_lower_bound_deepep_over_megamoe")),
@@ -119,6 +129,7 @@ def parse_result(path: Path) -> ResultRow | None:
         layers=int(workload["layers"]),
         mega_p50_ms=float(stage["p50_ms"]),
         reference_p50_ms=None,
+        reference_stack=None,
         speedup=None,
         speedup_lower_bound=None,
         mega_cv_percent=float(stage["cv_percent"]),
@@ -212,6 +223,7 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "layers",
         "mega_p50_ms",
         "reference_p50_ms",
+        "reference_stack",
         "speedup",
         "speedup_lower_bound",
         "mega_cv_percent",
