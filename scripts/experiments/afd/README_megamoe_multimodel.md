@@ -232,9 +232,12 @@ pass:
    most `1e-3` on every rank under the common numerical-check contract. That
    check uses the same block-128 FP8 input and pre-L2 top-k weighting on both
    paths; timed samples retain each backend's production quantization path.
-3. Both backends have stage CUDA latency CV at most 3% and finite output on
-   every rank.
-4. `speedup_deepep_over_megamoe` is greater than 1 for the same case.
+3. MegaMoE has stage CUDA latency CV at most 3% and finite output on every
+   rank. The reference CV is still reported, but it does not gate the measured
+   MegaMoE latency profile.
+4. The conservative same-sample speedup bound is greater than one: minimum
+   observed DeepEP latency divided by maximum observed MegaMoE latency. This
+   proves the gain without relying on a noisy reference mean or median.
 
 The JSON contains every latency sample, per-rank provenance, the source commit
 and tree hash, model contract, physical token count, routing load, correctness,

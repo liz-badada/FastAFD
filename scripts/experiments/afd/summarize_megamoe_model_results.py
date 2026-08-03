@@ -31,6 +31,7 @@ class ResultRow:
     mega_p50_ms: float
     reference_p50_ms: float | None
     speedup: float | None
+    speedup_lower_bound: float | None
     mega_cv_percent: float
     reference_cv_percent: float | None
     correctness: bool | None
@@ -89,12 +90,13 @@ def parse_result(path: Path) -> ResultRow | None:
                 None if reference is None else float(reference["stage_cuda"]["p50_ms"])
             ),
             speedup=_float(payload.get("speedup_deepep_over_megamoe")),
+            speedup_lower_bound=_float(payload.get("speedup_lower_bound_deepep_over_megamoe")),
             mega_cv_percent=float(mega["stage_cuda"]["cv_percent"]),
             reference_cv_percent=(
                 None if reference is None else float(reference["stage_cuda"]["cv_percent"])
             ),
             correctness=payload.get("correctness_passed"),
-            stable=bool(mega["stable"] and (reference is None or reference["stable"])),
+            stable=bool(mega["stable"]),
             eligible=bool(payload.get("eligible_for_profile", False)),
             source_commit=str(source.get("commit", "")),
             source_tree_sha256=str(source.get("source_tree_sha256", "")),
@@ -118,6 +120,7 @@ def parse_result(path: Path) -> ResultRow | None:
         mega_p50_ms=float(stage["p50_ms"]),
         reference_p50_ms=None,
         speedup=None,
+        speedup_lower_bound=None,
         mega_cv_percent=float(stage["cv_percent"]),
         reference_cv_percent=None,
         correctness=None,
@@ -210,6 +213,7 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "mega_p50_ms",
         "reference_p50_ms",
         "speedup",
+        "speedup_lower_bound",
         "mega_cv_percent",
         "reference_cv_percent",
         "correctness",
@@ -256,6 +260,7 @@ def write_profile(path: Path, rows: list[ResultRow]) -> None:
                     "stable": row.stable,
                     "correctness": row.correctness,
                     "matched_speedup": row.speedup,
+                    "matched_speedup_lower_bound": row.speedup_lower_bound,
                     "evidence": (
                         "same-point-colocated"
                         if row.stage == "agg"

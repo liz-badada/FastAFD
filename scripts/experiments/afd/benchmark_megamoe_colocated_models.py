@@ -836,10 +836,15 @@ def main() -> None:
         primary_backend = "mega" if "mega" in backend_results else "deepep"
         primary = backend_results[primary_backend]
         speedup = None
+        conservative_speedup = None
         if args.backend == "both":
             speedup = (
                 backend_results["deepep"]["stage_cuda"]["p50_ms"]
                 / backend_results["mega"]["stage_cuda"]["p50_ms"]
+            )
+            conservative_speedup = (
+                backend_results["deepep"]["stage_cuda"]["min_ms"]
+                / backend_results["mega"]["stage_cuda"]["max_ms"]
             )
         correctness_passed = (
             None
@@ -905,14 +910,17 @@ def main() -> None:
             "iterations": args.iterations,
             "backend_results": backend_results,
             "speedup_deepep_over_megamoe": speedup,
+            "speedup_lower_bound_deepep_over_megamoe": conservative_speedup,
             "deepep_backend": (deepep_buffer.metadata() if deepep_buffer is not None else None),
             "correctness_by_rank": correctness_by_rank,
             "correctness_passed": correctness_passed,
             "eligible_for_profile": bool(
-                all(result["stable"] for result in backend_results.values())
-                and correctness_passed is not False
-                and speedup is not None
-                and speedup > 1.0
+                args.backend == "both"
+                and backend_results["mega"]["stable"]
+                and all(backend_results["deepep"]["all_outputs_finite_by_rank"])
+                and correctness_passed is True
+                and conservative_speedup is not None
+                and conservative_speedup > 1.0
             ),
             "stage_cuda": primary["stage_cuda"],
             "stage_wall": primary["stage_wall"],
@@ -923,7 +931,13 @@ def main() -> None:
             "all_outputs_finite_by_rank": primary["all_outputs_finite_by_rank"],
             "output_abs_mean_by_rank": primary["output_abs_mean_by_rank"],
             "stable": primary["stable"],
-            "stability_contract": "stage CUDA CV <= 3% and finite output on every rank",
+            "stability_contract": (
+                "profile backend (MegaMoE) stage CUDA CV <= 3% and finite output on every rank"
+            ),
+            "qualification_contract": (
+                "MegaMoE stable; matched output check passes; all reference outputs finite; "
+                "minimum observed DeepEP latency divided by maximum observed MegaMoE latency is > 1"
+            ),
             "initialization_seconds_by_rank": init_times,
             "peak_cuda_memory_bytes_by_rank": peak_memories,
             "quantization_validation_by_rank": quant_validations,
@@ -941,6 +955,7 @@ def main() -> None:
                         name: result["stage_cuda"] for name, result in backend_results.items()
                     },
                     "speedup_deepep_over_megamoe": speedup,
+                    "speedup_lower_bound_deepep_over_megamoe": conservative_speedup,
                     "correctness_passed": correctness_passed,
                 },
                 indent=2,
