@@ -105,7 +105,7 @@ sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 ```
 
 Set `MEASUREMENT_SYSTEM` to the AIC system key represented by the allocation.
-The B200 submit script defaults it to `b200`; a GB200/NVL72 submission must set
+The B200 submit script defaults it to `b200_sxm`; a GB200/NVL72 submission must set
 `MEASUREMENT_SYSTEM=gb200` and use the corresponding partition and GPU count.
 
 ## Acceptance gates

@@ -15,7 +15,7 @@ set -euo pipefail
 
 host_root=${HOST_ROOT:-/home/scratch.jinyanc_wwfo/fastafd_measure_20260721}
 image=${CONTAINER_IMAGE:-/home/scratch.jinyanc_wwfo/enroot_images/sglang_deepseek_v4_blackwell.sqsh}
-measurement_system=${MEASUREMENT_SYSTEM:-b200}
+measurement_system=${MEASUREMENT_SYSTEM:-b200_sxm}
 run_script=${RUN_SCRIPT:-run_megamoe_m2n_model_benchmark.sh}
 source_root=${SOURCE_ROOT:-${host_root}/FastAFD-megamoe-multimodel}
 case "${source_root}" in
