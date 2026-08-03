@@ -75,9 +75,42 @@ name.
 
    SOURCE_ROOT=/path/to/FastAFD \
    RUN_SCRIPT=run_megamoe_m2n_model_suite.sh \
-   AFD_SPLIT_GRID="4:4" \
    SEQUENCES_PER_AG_RANK_GRID="8 16 32 48 64 96 128 192" \
    MICROBATCH_GRID="1 2 4" MTP_NEXTN_GRID="0 1 2 3" \
+   sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+   ```
+
+   Unless `AFD_SPLIT_GRID` is set explicitly, the split suite selects `4A4F`
+   for Qwen3-235B, MiniMax-M2.5, MiniMax-M3, and DeepSeek-V4-Flash, and
+   `2A6F` for DeepSeek-V4-Pro. V4-Pro has 384 routed experts and 61 MoE
+   layers; keeping all benchmark weight slots resident does not fit the
+   validated `4A4F` B200 memory envelope. `2A6F` preserves an integral
+   64-expert F-rank shard without streaming or reusing layer weights.
+
+   To reproduce only the compact formal grid used by the reference data, run:
+
+   ```bash
+   SOURCE_ROOT=/path/to/FastAFD \
+   RUN_SCRIPT=run_megamoe_colocated_model_suite.sh \
+   MODELS="qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 deepseek_v4_flash_fp4 deepseek_v4_pro_fp4" \
+   TOKENS_PER_RANK_GRID="48 96" MTP_NEXTN_GRID="0 1 2 3" \
+   WARMUPS=30 ITERATIONS=40 \
+   sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+
+   SOURCE_ROOT=/path/to/FastAFD \
+   RUN_SCRIPT=run_megamoe_m2n_model_suite.sh \
+   MODELS="qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 deepseek_v4_flash_fp4" \
+   AFD_SPLIT_GRID="4:4" SEQUENCES_PER_AG_RANK_GRID="48 96" \
+   MICROBATCH_GRID="1 2 4" MTP_NEXTN_GRID="0 1 2 3" \
+   WARMUPS=30 ITERATIONS=40 \
+   sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+
+   SOURCE_ROOT=/path/to/FastAFD \
+   RUN_SCRIPT=run_megamoe_m2n_model_suite.sh \
+   MODELS="deepseek_v4_pro_fp4" AFD_SPLIT_GRID="2:6" \
+   SEQUENCES_PER_AG_RANK_GRID="48 96" \
+   MICROBATCH_GRID="1 2 4" MTP_NEXTN_GRID="0 1 2 3" \
+   WARMUPS=30 ITERATIONS=40 \
    sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
    ```
 
