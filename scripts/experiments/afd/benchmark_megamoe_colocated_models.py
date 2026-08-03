@@ -708,6 +708,25 @@ def main() -> None:
         relative_l2 = float(torch.linalg.vector_norm(difference).item()) / max(
             reference_norm, 1e-12
         )
+        row_max_abs = difference.abs().amax(dim=1)
+        differing_rows = torch.nonzero(row_max_abs > 0, as_tuple=False).flatten()
+        row_diagnostics = []
+        for row_idx_tensor in differing_rows[:16]:
+            row_idx = int(row_idx_tensor.item())
+            row_difference = difference[row_idx].abs()
+            row_diagnostics.append(
+                {
+                    "row": row_idx,
+                    "max_abs_error": float(row_difference.max().item()),
+                    "mean_abs_error": float(row_difference.mean().item()),
+                    "mega_abs_mean": float(mega_reference[row_idx].float().abs().mean().item()),
+                    "deepep_abs_mean": float(
+                        deepep_reference[row_idx].float().abs().mean().item()
+                    ),
+                    "protocol_expert_ids": topk_ids[row_idx].tolist(),
+                    "protocol_topk_weights": topk_weights[row_idx].tolist(),
+                }
+            )
         correctness = {
             "contract": (
                 "MegaMoE and official DeepEP+DeepGEMM use identical block-128 FP8 "
@@ -719,6 +738,8 @@ def main() -> None:
             "max_abs_error": float(difference.abs().max().item()),
             "mean_abs_error": float(difference.abs().mean().item()),
             "relative_l2_error": relative_l2,
+            "rows_with_nonzero_error": int(differing_rows.numel()),
+            "first_differing_rows": row_diagnostics,
             "threshold_relative_l2": 1e-3,
             "passed": bool(relative_l2 <= 1e-3),
         }
