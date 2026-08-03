@@ -1,5 +1,15 @@
 # Multi-model MegaMoE measurement
 
+Use the reproducible measurement branch:
+
+```bash
+git clone --branch megamoe-multimodel-b200 \
+  git@github.com:liz-badada/FastAFD.git
+cd FastAFD
+git status --short
+git rev-parse HEAD
+```
+
 This benchmark measures model-shaped MegaMoE stages for:
 
 - `qwen3_235b_{fp8,fp4}`
@@ -7,6 +17,10 @@ This benchmark measures model-shaped MegaMoE stages for:
 - `minimax_m3_{fp8,fp4}`
 - `deepseek_v4_flash_{fp8,fp4}`
 - `deepseek_v4_pro_{fp8,fp4}`
+
+Being listed means that the benchmark has an explicit model-shape contract. It
+does not mean that every model is already qualified for profile export; each
+measured point must pass the gates below.
 
 The exact hidden size, intermediate size, routed expert count, top-k, shared
 expert count, routing scale, and activation contract are defined in
@@ -52,6 +66,39 @@ expert count, routing scale, and activation contract are defined in
      --csv /path/to/megamoe_latency_reference.csv \
      --markdown /path/to/megamoe_latency_reference.md \
      --profile /path/to/afd_moe_stage_profile.json
+   ```
+
+4. Consume the profile with the matching AIC branch. `--require-measured-moe`
+   prevents a generic MoE estimate from being mixed into either comparison
+   arm.
+
+   ```bash
+   git clone --branch pr1323-afd-moe-eval \
+     git@github.com:liz-badada/aiconfigurator.git
+   cd aiconfigurator
+   uv sync --extra dev
+   git lfs pull
+   uv run python tools/afd_multimodel_mtp_experiment.py \
+     --output /path/to/measured_sweep.json \
+     --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash \
+     --workloads 8k 16k --total-gpus 16 24 36 48 72 \
+     --profile-scope primary \
+     --afd-moe-profile /path/to/afd_moe_stage_profile.json \
+     --require-measured-moe
+   ```
+
+5. Optionally replay selected service points with the matching Dynamo branch.
+
+   ```bash
+   git clone --branch afd-moe-timing \
+     git@github.com:liz-badada/dynamo.git
+   cd /path/to/aiconfigurator
+   uv run python tools/afd_multimodel_mtp_mocker_replay.py \
+     --sweep /path/to/measured_sweep.json \
+     --dynamo /path/to/dynamo \
+     --output-dir /path/to/mocker_replay \
+     --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash \
+     --workloads 8k 16k --total-gpus 16 24 36 48 72
    ```
 
 The raw JSON is the source of truth. The CSV and Markdown files are compact
