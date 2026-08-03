@@ -130,6 +130,12 @@ expert count, routing scale, and activation contract are defined in
      --workloads 8k 16k --total-gpus 16 24 36 48 72
    ```
 
+   This default run measures a finite request wave. For a steady-state
+   accounting check on one point, add `--output-tokens 128 --waves 64` and
+   narrow the model, workload, and GPU lists to one value. MTP makes the final
+   wave stochastic, so finite-wave output throughput can be below the AIC
+   saturated reference even when per-request TPOT agrees.
+
 The raw JSON is the source of truth. The CSV and Markdown files are compact
 views, and `afd_moe_stage_profile.json` contains only validated exact points.
 Do not hand-enter one constant `afd_moe_time_ms` for an entire sweep.
