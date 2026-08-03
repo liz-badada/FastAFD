@@ -230,7 +230,9 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     ]
     for row in rows:
         values = {
-            key: row.logical_batch * (row.mtp_nextn + 1) if key == "physical_batch" else getattr(row, key)
+            key: row.logical_batch * (row.mtp_nextn + 1)
+            if key == "physical_batch"
+            else getattr(row, key)
             for key in columns
         }
         lines.append("| " + " | ".join(format_value(values[key]) for key in columns) + " |")
@@ -286,7 +288,7 @@ def write_profile(path: Path, rows: list[ResultRow]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("inputs", nargs="+", type=Path)
-    parser.add_argument("--csv", type=Path, required=True)
+    parser.add_argument("--csv", type=Path)
     parser.add_argument("--markdown", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
     return parser.parse_args()
@@ -297,7 +299,8 @@ def main() -> int:
     rows = [row for path in result_files(args.inputs) if (row := parse_result(path)) is not None]
     rows = paired_split_eligibility(rows)
     validate_unique_profile_keys(rows)
-    write_csv(args.csv, rows)
+    if args.csv is not None:
+        write_csv(args.csv, rows)
     write_markdown(args.markdown, rows)
     write_profile(args.profile, rows)
     print(json.dumps({"rows": len(rows), "eligible": sum(row.eligible for row in rows)}, indent=2))

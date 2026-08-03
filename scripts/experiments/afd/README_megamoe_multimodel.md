@@ -87,7 +87,6 @@ name.
    ```bash
    python scripts/experiments/afd/summarize_megamoe_model_results.py \
      /path/to/colocated-results /path/to/split-results \
-     --csv /path/to/megamoe_latency_reference.csv \
      --markdown /path/to/megamoe_latency_reference.md \
      --profile /path/to/afd_moe_stage_profile.json
    ```
@@ -95,8 +94,10 @@ name.
    | Output | Use |
    | --- | --- |
    | `megamoe_latency_reference.md` | Compact human-readable latency and qualification table. |
-   | `megamoe_latency_reference.csv` | Machine-readable view of the same exact points. |
    | `afd_moe_stage_profile.json` | Validated exact-match timing input for AIC. |
+
+   Add `--csv /path/to/megamoe_latency_reference.csv` only when a separate
+   machine-readable table is needed.
 
    When a point was rerun, pass only the selected trial. The summarizer rejects
    duplicate eligible exact keys and reports both source paths instead of
@@ -114,7 +115,7 @@ name.
    git lfs pull
    uv run python tools/afd_multimodel_mtp_experiment.py \
      --output /path/to/measured_sweep.json \
-     --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash \
+     --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash deepseek_v4_pro \
      --workloads 8k 16k --total-gpus 16 24 36 48 72 \
      --profile-scope primary \
      --afd-moe-profile /path/to/afd_moe_stage_profile.json \
@@ -136,7 +137,7 @@ name.
      --sweep /path/to/measured_sweep.json \
      --dynamo /path/to/dynamo \
      --output-dir /path/to/mocker_replay \
-     --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash \
+     --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash deepseek_v4_pro \
      --workloads 8k 16k --total-gpus 16 24 36 48 72
    ```
 
