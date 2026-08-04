@@ -26,11 +26,13 @@ The runners prepend `/workspace/python_deps` to `PYTHONPATH`; the submit script
 maps `HOST_ROOT` to `/workspace`. This explicit dependency directory is needed
 when the selected SGLang container does not already provide `msgpack`. The
 split DeepEP path additionally requires the NCCL 2.30.4 Device API headers and
-library; its runner prepends this exact library to `LD_LIBRARY_PATH`. It fails
-closed when the required headers are absent instead of compiling against an
-older host-only NCCL package. Match the NCCL wheel's CUDA major to the
-container; the command above targets the documented CUDA 12.9 container. Set
-`PYTHON_DEPS_ROOT` only when using a different mounted dependency directory.
+library; its runner selects this exact library through `LD_LIBRARY_PATH` and
+`LD_PRELOAD`. The preload keeps DeepEP and ProcessGroupNCCL on one process-wide
+Device API version when the base PyTorch image pins an older `libnccl.so.2`.
+It fails closed when the required headers are absent instead of compiling
+against an older host-only NCCL package. Match the NCCL wheel's CUDA major to
+the container; the command above targets the documented CUDA 12.9 container.
+Set `PYTHON_DEPS_ROOT` only when using a different mounted dependency directory.
 
 The model registry provides split-stage contracts for:
 
