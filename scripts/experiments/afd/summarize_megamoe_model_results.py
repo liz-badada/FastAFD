@@ -104,7 +104,11 @@ def parse_results(path: Path) -> list[ResultRow]:
             return []
         mega = backends["mega"]
         reference = backends.get("deepep")
-        overall_eligible = bool(payload.get("eligible_for_profile", False))
+        layers = int(workload["layers"])
+        weight_slots = int(workload.get("weight_slots", layers))
+        overall_eligible = (
+            bool(payload.get("eligible_for_profile", False)) and weight_slots == layers
+        )
         reference_metadata = payload.get("deepep_backend") or {}
         ep_size = int(topology["ep_size"])
         shared = {
@@ -124,7 +128,7 @@ def parse_results(path: Path) -> list[ResultRow]:
             "logical_batch": int(workload["logical_tokens_per_rank"]),
             "mtp_nextn": int(workload["mtp_nextn"]),
             "microbatches": 1,
-            "layers": int(workload["layers"]),
+            "layers": layers,
             "speedup_deepep_over_megamoe": _float(payload.get("speedup_deepep_over_megamoe")),
             "speedup_lower_bound_deepep_over_megamoe": _float(
                 payload.get("speedup_lower_bound_deepep_over_megamoe")

@@ -958,6 +958,7 @@ def main() -> None:
             "correctness_passed": correctness_passed,
             "eligible_for_profile": bool(
                 args.backend == "both"
+                and weight_slots == layers
                 and backend_results["mega"]["stable"]
                 and backend_results["deepep"]["stable"]
                 and all(backend_results["deepep"]["all_outputs_finite_by_rank"])
@@ -973,11 +974,12 @@ def main() -> None:
             "output_abs_mean_by_rank": primary["output_abs_mean_by_rank"],
             "stable": primary["stable"],
             "stability_contract": (
-                "profile backend (MegaMoE) stage CUDA CV <= 3% and finite output on every rank"
+                "MegaMoE and DeepEP+DeepGEMM stage CUDA CV <= 3% and finite output on every rank"
             ),
             "qualification_contract": (
-                "MegaMoE and DeepEP+DeepGEMM timings stable; matched output check passes; "
-                "all outputs finite. Backend speedup is reported but does not filter valid timing evidence"
+                "All layer weights resident; MegaMoE and DeepEP+DeepGEMM timings stable; "
+                "matched output check passes; all outputs finite. Backend speedup is reported "
+                "but does not filter valid timing evidence"
             ),
             "initialization_seconds_by_rank": init_times,
             "peak_cuda_memory_bytes_by_rank": peak_memories,

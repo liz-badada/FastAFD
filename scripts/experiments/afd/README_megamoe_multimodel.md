@@ -116,6 +116,7 @@ name.
    RUN_SCRIPT=run_megamoe_colocated_model_suite.sh \
    MODELS="qwen3_235b_fp4 minimax_m25_fp4 minimax_m3_fp4 deepseek_v4_flash_fp4 deepseek_v4_pro_fp4" \
    TOKENS_PER_RANK_GRID="48 96" MTP_NEXTN_GRID="0 1 2 3" \
+   WEIGHT_SLOTS=0 \
    WARMUPS=30 ITERATIONS=40 \
    sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 
@@ -309,7 +310,7 @@ block-128 for the SGLang DeepEP path.
 MODEL=qwen3_235b_fp4 \
 EP_SIZE=8 TOKENS_PER_RANK=96 \
 MTP_NEXTN=0 LAYERS=94 \
-ROUTING=balanced BACKEND=both WEIGHT_SLOTS=2 \
+ROUTING=balanced BACKEND=both WEIGHT_SLOTS=0 \
 WARMUPS=30 ITERATIONS=30 \
 RESULTS_DIR=/workspace/results/megamoe-colocated \
 bash scripts/experiments/afd/run_megamoe_colocated_model_benchmark.sh
@@ -378,17 +379,19 @@ pass:
    path.
 3. MegaMoE and DeepEP+DeepGEMM both have stage CUDA latency CV at most 3% and
    finite output on every rank.
-4. The conservative same-sample speedup bound is recorded as minimum observed
+4. Colocated AGG points keep one deterministic weight set per measured MoE
+   layer. Reduced `WEIGHT_SLOTS` runs are diagnostic and are not exported.
+5. The conservative same-sample speedup bound is recorded as minimum observed
    DeepEP latency divided by maximum observed MegaMoE latency. It is not an
    admission filter: keeping valid measurements below one prevents a biased
    backend comparison. `megamoe_outperforms_reference` records whether this
    conservative bound is greater than one.
-5. A split AFD point has a qualified colocated comparison at the same model,
+6. A split AFD point has a qualified colocated comparison at the same model,
    precision, system, logical source-rank batch, MTP `nextN`, and layer count.
    The exporter copies that comparison's correctness and conservative speedup
    bound into the split point's validation evidence; it does not accept a
    different workload merely because the model name matches.
-6. A split DeepEP+DeepGEMM point keeps one resident weight set per measured
+7. A split DeepEP+DeepGEMM point keeps one resident weight set per measured
    layer. A reduced `WEIGHT_SLOTS` run is retained as a diagnostic JSON but is
    not eligible for profile export.
 
