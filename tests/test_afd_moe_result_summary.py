@@ -104,3 +104,85 @@ def test_legacy_split_schema_defaults_to_megamoe(tmp_path: Path) -> None:
 
     assert len(rows) == 1
     assert rows[0].moe_backend == summary.MEGAMOE_BACKEND
+
+
+def test_base_profile_validates_and_retains_incremental_split(tmp_path: Path) -> None:
+    colocated = _common_payload() | {
+        "schema": summary.COLOCATED_SCHEMA,
+        "topology": {"ep_size": 8},
+        "workload": {"logical_tokens_per_rank": 48, "mtp_nextn": 1, "layers": 94},
+        "backend_results": {
+            "mega": {"stage_cuda": {"p50_ms": 7.5, "cv_percent": 1.0}, "stable": True},
+            "deepep": {
+                "stage_cuda": {"p50_ms": 10.5, "cv_percent": 1.5},
+                "stable": True,
+            },
+        },
+        "deepep_backend": {"deep_ep_version": "1", "sglang_version": "2"},
+        "speedup_deepep_over_megamoe": 1.4,
+        "speedup_lower_bound_deepep_over_megamoe": 1.3,
+        "correctness_passed": True,
+        "eligible_for_profile": True,
+    }
+    base_rows = summary.parse_results(_write(tmp_path / "agg.json", colocated))
+    base_path = tmp_path / "base.json"
+    summary.write_profile(base_path, base_rows)
+    base_entries = summary.load_base_profile(base_path)
+
+    split = _common_payload() | {
+        "schema": summary.SPLIT_SCHEMA,
+        "moe_backend": summary.DEEPEP_BACKEND,
+        "backend_implementation": "DeepEP M2N plus DeepGEMM",
+        "topology": {"ag_size": 4, "eg_size": 4},
+        "workload": {
+            "sequences_per_ag_rank": 48,
+            "mtp_nextn": 1,
+            "microbatches": 2,
+            "layers": 94,
+        },
+        "stage_cuda": {"p50_ms": 8.0, "cv_percent": 1.2},
+        "stable": True,
+        "eligible_for_profile": True,
+    }
+    split_rows = summary.parse_results(_write(tmp_path / "afd.json", split))
+    paired = summary.paired_split_eligibility(split_rows, base_entries=base_entries)
+    merged_path = tmp_path / "merged.json"
+    summary.write_profile(merged_path, paired, base_entries=base_entries)
+    entries = json.loads(merged_path.read_text(encoding="utf-8"))["entries"]
+
+    assert paired[0].eligible is True
+    assert len(entries) == 3
+    assert (entries[-1]["stage"], entries[-1]["moe_backend"]) == (
+        "afd",
+        summary.DEEPEP_BACKEND,
+    )
+
+
+def test_base_profile_rejects_duplicate_incremental_key(tmp_path: Path) -> None:
+    payload = _common_payload() | {
+        "schema": summary.LEGACY_SPLIT_SCHEMA,
+        "topology": {"ag_size": 4, "eg_size": 4},
+        "workload": {
+            "sequences_per_ag_rank": 48,
+            "mtp_nextn": 0,
+            "microbatches": 2,
+            "layers": 94,
+        },
+        "stage_cuda": {"p50_ms": 6.0, "cv_percent": 1.0},
+        "stable": True,
+    }
+    rows = summary.parse_results(_write(tmp_path / "split.json", payload))
+    rows[0] = summary.ResultRow(**(rows[0].__dict__ | {"eligible": True}))
+    base_path = tmp_path / "base.json"
+    summary.write_profile(base_path, rows)
+
+    try:
+        summary.write_profile(
+            tmp_path / "merged.json",
+            rows,
+            base_entries=summary.load_base_profile(base_path),
+        )
+    except ValueError as error:
+        assert "duplicates an exact key" in str(error)
+    else:
+        raise AssertionError("duplicate incremental exact key was accepted")

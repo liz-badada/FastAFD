@@ -151,6 +151,21 @@ name.
      --profile /path/to/afd_moe_stage_profile.json
    ```
 
+   To append newly measured backend points without rerunning the retained
+   exact measurements, use the committed profile as the validation base. A
+   new split row is accepted only when the base contains a stable,
+   correctness-passing colocated row for the same model, precision, system,
+   backend, source-rank batch, MTP width, and layer count. Duplicate exact keys
+   fail instead of silently replacing data.
+
+   ```bash
+   python scripts/experiments/afd/summarize_megamoe_model_results.py \
+     /path/to/new-split-results \
+     --base-profile scripts/experiments/afd/reference/b200_sxm/afd_moe_stage_profile.json \
+     --markdown /path/to/new_split_latency_reference.md \
+     --profile /path/to/afd_moe_stage_profile_extended.json
+   ```
+
    | Output | Use |
    | --- | --- |
    | `megamoe_latency_reference.md` | Compact human-readable latency and qualification table. |

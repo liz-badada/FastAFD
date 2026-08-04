@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 from collections import defaultdict
@@ -17,6 +18,7 @@ LEGACY_SPLIT_SCHEMA = "fastafd.megamoe-m2n-model-benchmark.v1"
 SPLIT_SCHEMA = "fastafd.moe-m2n-model-benchmark.v2"
 MEGAMOE_BACKEND = "megamoe"
 DEEPEP_BACKEND = "deepep_deepgemm"
+PROFILE_SCHEMA = "aic.afd-moe-stage-profile.v2"
 
 
 @dataclass(frozen=True)
@@ -211,7 +213,58 @@ def parse_results(path: Path) -> list[ResultRow]:
     ]
 
 
-def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
+def profile_entry_key(entry: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        entry["model_path"],
+        entry["system"],
+        entry["stage"],
+        entry["moe_backend"],
+        entry["topology"],
+        entry["logical_batch_per_source_rank"],
+        entry["mtp_nextn"],
+        entry["microbatches"],
+        entry["moe_layers"],
+        entry["moe_precision"],
+    )
+
+
+def profile_validation_key(entry: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        entry["model_profile"],
+        entry["moe_precision"],
+        entry["system"],
+        entry["moe_backend"],
+        entry["logical_batch_per_source_rank"],
+        entry["mtp_nextn"],
+        entry["moe_layers"],
+    )
+
+
+def load_base_profile(path: Path | None) -> list[dict[str, Any]]:
+    if path is None:
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema") != PROFILE_SCHEMA:
+        raise ValueError(f"base profile must use schema {PROFILE_SCHEMA!r}")
+    if payload.get("lookup_policy") != "exact-only":
+        raise ValueError("base profile lookup_policy must be 'exact-only'")
+    entries = payload.get("entries")
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise TypeError("base profile entries must be a list of objects")
+    seen: set[tuple[Any, ...]] = set()
+    for entry in entries:
+        key = profile_entry_key(entry)
+        if key in seen:
+            raise ValueError(f"duplicate exact key in base profile: {key}")
+        seen.add(key)
+    return copy.deepcopy(entries)
+
+
+def paired_split_eligibility(
+    rows: list[ResultRow],
+    *,
+    base_entries: list[dict[str, Any]] | None = None,
+) -> list[ResultRow]:
     def validation_key(row: ResultRow) -> tuple[Any, ...]:
         return (
             row.model,
@@ -235,12 +288,22 @@ def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
             )
         validated[key] = row
 
+    base_validated = {
+        profile_validation_key(entry)
+        for entry in base_entries or []
+        if entry.get("stage") == "agg"
+        and entry.get("validation", {}).get("stable") is True
+        and entry.get("validation", {}).get("correctness") is True
+    }
+
     paired = []
     for row in rows:
         if row.stage != "afd":
             paired.append(row)
             continue
-        reference = validated.get(validation_key(row))
+        key = validation_key(row)
+        reference = validated.get(key)
+        externally_validated = key in base_validated
         paired.append(
             ResultRow(
                 **(
@@ -255,7 +318,11 @@ def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
                             if reference is None
                             else reference.speedup_lower_bound_deepep_over_megamoe
                         ),
-                        "eligible": bool(row.stable and row.eligible and reference is not None),
+                        "eligible": bool(
+                            row.stable
+                            and row.eligible
+                            and (reference is not None or externally_validated)
+                        ),
                     }
                 )
             )
@@ -472,8 +539,14 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_profile(path: Path, rows: list[ResultRow]) -> None:
-    entries: list[dict[str, Any]] = []
+def write_profile(
+    path: Path,
+    rows: list[ResultRow],
+    *,
+    base_entries: list[dict[str, Any]] | None = None,
+) -> None:
+    entries: list[dict[str, Any]] = copy.deepcopy(base_entries or [])
+    seen = {profile_entry_key(entry) for entry in entries}
 
     def add_entry(
         row: ResultRow,
@@ -484,34 +557,37 @@ def write_profile(path: Path, rows: list[ResultRow]) -> None:
         matched_speedup_lower_bound: float | None,
         evidence: str,
     ) -> None:
-        entries.append(
-            {
-                "model_path": row.model_path,
-                "model_profile": row.model,
-                "system": row.system,
-                "stage": row.stage,
-                "topology": row.topology,
-                "logical_batch_per_source_rank": row.logical_batch,
-                "mtp_nextn": row.mtp_nextn,
-                "microbatches": row.microbatches,
-                "moe_layers": row.layers,
-                "moe_precision": row.precision,
-                "moe_backend": moe_backend,
-                "latency_ms": latency_ms,
-                "validation": {
-                    "stable": row.stable,
-                    "correctness": row.correctness,
-                    "matched_speedup": matched_speedup,
-                    "matched_speedup_lower_bound": matched_speedup_lower_bound,
-                    "evidence": evidence,
-                },
-                "source": {
-                    "commit": row.source_commit,
-                    "source_tree_sha256": row.source_tree_sha256,
-                    "result": row.path,
-                },
-            }
-        )
+        entry = {
+            "model_path": row.model_path,
+            "model_profile": row.model,
+            "system": row.system,
+            "stage": row.stage,
+            "topology": row.topology,
+            "logical_batch_per_source_rank": row.logical_batch,
+            "mtp_nextn": row.mtp_nextn,
+            "microbatches": row.microbatches,
+            "moe_layers": row.layers,
+            "moe_precision": row.precision,
+            "moe_backend": moe_backend,
+            "latency_ms": latency_ms,
+            "validation": {
+                "stable": row.stable,
+                "correctness": row.correctness,
+                "matched_speedup": matched_speedup,
+                "matched_speedup_lower_bound": matched_speedup_lower_bound,
+                "evidence": evidence,
+            },
+            "source": {
+                "commit": row.source_commit,
+                "source_tree_sha256": row.source_tree_sha256,
+                "result": row.path,
+            },
+        }
+        key = profile_entry_key(entry)
+        if key in seen:
+            raise ValueError(f"new result duplicates an exact key in the base profile: {key}")
+        seen.add(key)
+        entries.append(entry)
 
     for row in rows:
         if not row.eligible:
@@ -535,7 +611,7 @@ def write_profile(path: Path, rows: list[ResultRow]) -> None:
             ),
         )
     payload = {
-        "schema": "aic.afd-moe-stage-profile.v2",
+        "schema": PROFILE_SCHEMA,
         "lookup_policy": "exact-only",
         "entries": entries,
     }
@@ -549,18 +625,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--csv", type=Path)
     parser.add_argument("--markdown", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument(
+        "--base-profile",
+        type=Path,
+        help="Validated exact profile to retain and use for colocated correctness gates",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    base_entries = load_base_profile(args.base_profile)
     rows = [row for path in result_files(args.inputs) for row in parse_results(path)]
-    rows = paired_split_eligibility(rows)
+    rows = paired_split_eligibility(rows, base_entries=base_entries)
     validate_unique_profile_keys(rows)
     if args.csv is not None:
         write_csv(args.csv, rows)
     write_markdown(args.markdown, rows)
-    write_profile(args.profile, rows)
+    write_profile(args.profile, rows, base_entries=base_entries)
     print(json.dumps({"rows": len(rows), "eligible": sum(row.eligible for row in rows)}, indent=2))
     return 0
 
