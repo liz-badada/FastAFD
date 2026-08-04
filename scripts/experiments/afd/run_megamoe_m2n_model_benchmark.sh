@@ -3,6 +3,7 @@ set -euo pipefail
 
 workspace=${WORKSPACE:-/workspace}
 fastafd_root=${FASTAFD_ROOT:-${workspace}/FastAFD-megamoe-multimodel}
+python_deps=${PYTHON_DEPS_ROOT:-${workspace}/python_deps}
 results_dir=${RESULTS_DIR:-${workspace}/results/megamoe-multimodel}
 model=${MODEL:?set MODEL to a key from megamoe_model_profiles.py}
 ag_size=${AG_SIZE:-4}
@@ -23,10 +24,10 @@ mkdir -p "${workspace}/runtime_home" "${workspace}/cache/deepgemm-multimodel" "$
 export HOME="${workspace}/runtime_home"
 export XDG_CACHE_HOME="${workspace}/cache"
 export MINISGL_DEEPGEMM_BUILD_DIR="${workspace}/cache/deepgemm-multimodel"
-export PYTHONPATH="${workspace}/python_deps:${fastafd_root}/python"
+export PYTHONPATH="${python_deps}:${fastafd_root}/python"
 export MEASUREMENT_CONTAINER_IMAGE=${MEASUREMENT_CONTAINER_IMAGE:-unknown}
 if [[ ${backend} == deepep ]]; then
-  nccl_root=${NCCL_ROOT:-${workspace}/python_deps/nvidia/nccl}
+  nccl_root=${NCCL_ROOT:-${python_deps}/nvidia/nccl}
   for required in include/nccl.h include/nccl_device.h include/nccl_device/core.h lib/libnccl.so.2; do
     if [[ ! -e ${nccl_root}/${required} ]]; then
       echo "split DeepEP requires NCCL >=2.30.4 under ${nccl_root}; missing ${required}" >&2
