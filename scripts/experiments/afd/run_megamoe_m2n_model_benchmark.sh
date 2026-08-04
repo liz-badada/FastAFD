@@ -12,6 +12,8 @@ mtp_nextn=${MTP_NEXTN:-0}
 microbatches=${MICROBATCHES:-2}
 layers=${LAYERS:-0}
 routing=${ROUTING:-balanced}
+backend=${BACKEND:-mega}
+weight_slots=${WEIGHT_SLOTS:-0}
 expected_tokens_per_lane=${EXPECTED_TOKENS_PER_LANE:-}
 prefetch_mib=${PREFETCH_MIB:-0}
 warmups=${WARMUPS:-30}
@@ -24,7 +26,7 @@ export MINISGL_DEEPGEMM_BUILD_DIR="${workspace}/cache/deepgemm-multimodel"
 export PYTHONPATH="${workspace}/python_deps:${fastafd_root}/python"
 export MEASUREMENT_CONTAINER_IMAGE=${MEASUREMENT_CONTAINER_IMAGE:-unknown}
 
-suffix="${model}_${ag_size}a${eg_size}f_s${sequences_per_ag_rank}_n${mtp_nextn}_mb${microbatches}_${routing}"
+suffix="${model}_${backend}_${ag_size}a${eg_size}f_s${sequences_per_ag_rank}_n${mtp_nextn}_mb${microbatches}_${routing}"
 args=(
   --model "${model}"
   --output "${results_dir}/${suffix}.json"
@@ -35,6 +37,8 @@ args=(
   --microbatches "${microbatches}"
   --layers "${layers}"
   --routing "${routing}"
+  --backend "${backend}"
+  --weight-slots "${weight_slots}"
   --prefetch-mib "${prefetch_mib}"
   --warmups "${warmups}"
   --iterations "${iterations}"

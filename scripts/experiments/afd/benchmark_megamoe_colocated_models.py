@@ -718,8 +718,7 @@ def main() -> None:
             and torch.isfinite(deepep_reference).all().item()
         )
         ulp_difference = (
-            bf16_ordered_codes(mega_reference)
-            - bf16_ordered_codes(deepep_reference)
+            bf16_ordered_codes(mega_reference) - bf16_ordered_codes(deepep_reference)
         ).abs()
         max_bf16_ulp_error = int(ulp_difference.max().item())
         reference_norm = float(torch.linalg.vector_norm(deepep_reference.float()).item())
@@ -739,9 +738,7 @@ def main() -> None:
                     "mean_abs_error": float(row_difference.mean().item()),
                     "max_bf16_ulp_error": int(ulp_difference[row_idx].max().item()),
                     "mega_abs_mean": float(mega_reference[row_idx].float().abs().mean().item()),
-                    "deepep_abs_mean": float(
-                        deepep_reference[row_idx].float().abs().mean().item()
-                    ),
+                    "deepep_abs_mean": float(deepep_reference[row_idx].float().abs().mean().item()),
                     "protocol_expert_ids": topk_ids[row_idx].tolist(),
                     "protocol_topk_weights": topk_weights[row_idx].tolist(),
                 }
@@ -770,9 +767,7 @@ def main() -> None:
 
     output_by_backend: dict[str, torch.Tensor] = {}
     for warmup in range(args.warmups):
-        order = (
-            enabled_backends if warmup % 2 == 0 else tuple(reversed(enabled_backends))
-        )
+        order = enabled_backends if warmup % 2 == 0 else tuple(reversed(enabled_backends))
         for name in order:
             dist.barrier()
             start = torch.cuda.Event(enable_timing=True)
@@ -955,16 +950,18 @@ def main() -> None:
             "backend_results": backend_results,
             "speedup_deepep_over_megamoe": speedup,
             "speedup_lower_bound_deepep_over_megamoe": conservative_speedup,
+            "megamoe_outperforms_reference": bool(
+                conservative_speedup is not None and conservative_speedup > 1.0
+            ),
             "deepep_backend": (deepep_buffer.metadata() if deepep_buffer is not None else None),
             "correctness_by_rank": correctness_by_rank,
             "correctness_passed": correctness_passed,
             "eligible_for_profile": bool(
                 args.backend == "both"
                 and backend_results["mega"]["stable"]
+                and backend_results["deepep"]["stable"]
                 and all(backend_results["deepep"]["all_outputs_finite_by_rank"])
                 and correctness_passed is True
-                and conservative_speedup is not None
-                and conservative_speedup > 1.0
             ),
             "stage_cuda": primary["stage_cuda"],
             "stage_wall": primary["stage_wall"],
@@ -979,8 +976,8 @@ def main() -> None:
                 "profile backend (MegaMoE) stage CUDA CV <= 3% and finite output on every rank"
             ),
             "qualification_contract": (
-                "MegaMoE stable; matched output check passes; all reference outputs finite; "
-                "minimum observed DeepEP latency divided by maximum observed MegaMoE latency is > 1"
+                "MegaMoE and DeepEP+DeepGEMM timings stable; matched output check passes; "
+                "all outputs finite. Backend speedup is reported but does not filter valid timing evidence"
             ),
             "initialization_seconds_by_rank": init_times,
             "peak_cuda_memory_bytes_by_rank": peak_memories,

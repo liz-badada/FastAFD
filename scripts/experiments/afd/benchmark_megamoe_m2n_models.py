@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Measure the FastAFD split MegaMoE MoE-stage boundary on one NVLink domain.
+"""Measure split FastAFD MoE backends on one NVLink domain.
 
 The command is intentionally workload-driven. ``sequences-per-ag-rank`` is the
 decode concurrency owned by one attention rank. With MTP next-N, each sequence
 contributes ``next_n + 1`` physical verify tokens. Those tokens are divided
-evenly over the requested microbatch lanes before entering MegaMoE.
+evenly over the requested microbatch lanes before entering the selected backend.
 
 This is not a full-serving benchmark. It measures the fused A-side
-quant/dispatch/wait/combine kernels together with the persistent F-side expert
-kernel for all MoE layers. Router, attention, dense-only layers, residuals,
-sampling, and coordinator overhead are outside the boundary.
+quant/dispatch/wait/combine path together with the F-side expert kernels for all
+MoE layers. Router, attention, dense-only layers, residuals, sampling, and
+coordinator overhead are outside the boundary.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import platform
 import statistics
 import subprocess
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +38,15 @@ from minisgl.moe.megamoe_model_profiles import (
 )
 
 INPUT_SEED_BASE = 0xAFD80000
+SPLIT_SCHEMA = "fastafd.moe-m2n-model-benchmark.v2"
+MEGAMOE_BACKEND = "megamoe"
+DEEPEP_BACKEND = "deepep_deepgemm"
+
+
+@dataclass(frozen=True)
+class DeepEPFP4LayerWeights:
+    l1: tuple[torch.Tensor, torch.Tensor]
+    l2: tuple[torch.Tensor, torch.Tensor]
 
 
 def utc_now() -> str:
@@ -234,6 +243,92 @@ def make_fp4_source_weights(
     return l1, l2
 
 
+def protocol_shape(
+    profile: MegaMoEModelProfile,
+    eg_size: int,
+) -> tuple[int, int, int]:
+    """Return local routed experts, global protocol experts, and protocol top-k."""
+    profile.validate(eg_size=eg_size)
+    local_routed = profile.num_routed_experts // eg_size
+    local_protocol = local_routed + profile.num_shared_experts
+    return local_routed, local_protocol * eg_size, profile.protocol_top_k
+
+
+def make_deepep_protocol_routes(
+    profile: MegaMoEModelProfile,
+    tokens: int,
+    *,
+    rank: int,
+    lane: int,
+    eg_size: int,
+    routing: str,
+    hot_expert_fraction: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build the exact split-M2N protocol routes consumed by DeepEP.
+
+    Routed experts are remapped from the model's global expert numbering to
+    contiguous per-F-rank protocol slots. A declared shared expert is appended
+    on the same F rank selected by the fused MegaMoE M2N contract.
+    """
+    real_ids, weights, _real_counts = make_routes(
+        profile,
+        tokens,
+        rank=rank,
+        lane=lane,
+        routing=routing,
+        hot_expert_fraction=hot_expert_fraction,
+    )
+    local_routed, protocol_experts, protocol_topk = protocol_shape(profile, eg_size)
+    owner = torch.div(real_ids, local_routed, rounding_mode="floor")
+    local_id = real_ids.remainder(local_routed)
+    protocol_ids = owner * (local_routed + profile.num_shared_experts) + local_id
+    if profile.num_shared_experts:
+        shared_owner = rank % eg_size
+        shared_id = shared_owner * (local_routed + 1) + local_routed
+        shared_ids = torch.full(
+            (tokens, 1),
+            shared_id,
+            dtype=torch.int64,
+            device="cuda",
+        )
+        shared_weights = torch.full(
+            (tokens, 1),
+            1.0 / profile.routed_scaling_factor,
+            dtype=torch.float32,
+            device="cuda",
+        )
+        protocol_ids = torch.cat((protocol_ids, shared_ids), dim=1)
+        weights = torch.cat((weights, shared_weights), dim=1)
+    if tuple(protocol_ids.shape) != (tokens, protocol_topk):
+        raise RuntimeError(
+            "DeepEP protocol route shape mismatch: "
+            f"got={tuple(protocol_ids.shape)} expected={(tokens, protocol_topk)}"
+        )
+    counts = torch.bincount(protocol_ids.flatten(), minlength=protocol_experts)
+    return protocol_ids.contiguous(), weights.contiguous(), counts
+
+
+def make_deepep_fp4_weights(
+    profile: MegaMoEModelProfile,
+    *,
+    local_protocol_experts: int,
+    layer_id: int,
+) -> DeepEPFP4LayerWeights:
+    from minisgl.kernel.megamoe_m2n_mega import cast_weights_to_fp4
+
+    l1, l2 = make_fp4_source_weights(
+        profile,
+        local_protocol_experts,
+        layer_id=layer_id,
+    )
+    packed = DeepEPFP4LayerWeights(
+        l1=cast_weights_to_fp4(l1),
+        l2=cast_weights_to_fp4(l2),
+    )
+    del l1, l2
+    return packed
+
+
 def make_routes(
     profile: MegaMoEModelProfile,
     tokens: int,
@@ -277,7 +372,7 @@ def route_summary(counts: torch.Tensor) -> dict[str, float | int]:
     }
 
 
-def register_layers(
+def register_megamoe_layers(
     adapter: Any,
     profile: MegaMoEModelProfile,
     *,
@@ -311,7 +406,7 @@ def register_layers(
             torch.cuda.empty_cache()
 
 
-def run_stage(
+def run_megamoe_stage(
     *,
     adapter: Any,
     is_ag: bool,
@@ -358,6 +453,243 @@ def run_stage(
     return float(start.elapsed_time(end)), (time.perf_counter() - wall_start) * 1000.0
 
 
+def run_deepep_fp4_experts(
+    *,
+    profile: MegaMoEModelProfile,
+    dispatch_output: Any,
+    weights: DeepEPFP4LayerWeights,
+    expert_alignment: int,
+) -> torch.Tensor:
+    """Run the production psum-layout FP8xFP4 DeepGEMM expert boundary."""
+    from minisgl.kernel import deepgemm
+    from minisgl.kernel.deepgemm_fused_quant import persistent_psum_silu_mul_quant
+
+    hidden = dispatch_output.hidden_states
+    hidden_scale = dispatch_output.hidden_states_scale
+    psum = dispatch_output.recv_count
+    if hidden.dtype != torch.float8_e4m3fn or hidden_scale is None:
+        raise RuntimeError("split DeepEP FP4 requires FP8 activations with packed scales")
+    if hidden.ndim != 2 or psum.ndim != 1:
+        raise RuntimeError(
+            f"invalid DeepEP psum layout: hidden={tuple(hidden.shape)} psum={tuple(psum.shape)}"
+        )
+    rows = int(hidden.shape[0])
+    experts = int(psum.shape[0])
+    if int(weights.l1[0].shape[0]) != experts or int(weights.l2[0].shape[0]) != experts:
+        raise RuntimeError(
+            "DeepEP weight/dispatch expert mismatch: "
+            f"weights={int(weights.l1[0].shape[0])} dispatch={experts}"
+        )
+    expected_m = max(1, rows // max(1, experts))
+    l1_output = torch.empty(
+        (rows, 2 * profile.intermediate_size),
+        dtype=torch.bfloat16,
+        device=hidden.device,
+    )
+    deepgemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+        (hidden.contiguous(), hidden_scale),
+        weights.l1,
+        l1_output,
+        psum,
+        recipe_a=(1, 128),
+        recipe_b=(1, 32),
+        disable_ue8m0_cast=False,
+        use_psum_layout=True,
+        expected_m_for_psum_layout=expected_m,
+    )
+    l2_input, l2_input_scale = persistent_psum_silu_mul_quant(
+        l1_output,
+        psum,
+        alignment=expert_alignment,
+        topk_weights=dispatch_output.topk_weights,
+        group_size=32,
+        activation_clamp=profile.activation_clamp,
+        activation_alpha=profile.activation_alpha,
+        activation_up_bias=profile.activation_up_bias,
+    )
+    output = torch.empty(
+        (rows, profile.hidden_size),
+        dtype=torch.bfloat16,
+        device=hidden.device,
+    )
+    deepgemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+        (l2_input, l2_input_scale),
+        weights.l2,
+        output,
+        psum,
+        recipe=(1, 1, 32),
+        disable_ue8m0_cast=False,
+        use_psum_layout=True,
+        expected_m_for_psum_layout=expected_m,
+    )
+    return output
+
+
+def run_deepep_stage(
+    *,
+    profile: MegaMoEModelProfile,
+    adapters: tuple[Any, ...],
+    is_ag: bool,
+    layers: int,
+    physical_tokens_per_lane: int,
+    lane_streams: tuple[torch.cuda.Stream, ...],
+    inputs: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...],
+    weights: tuple[DeepEPFP4LayerWeights, ...],
+    expert_alignment: int,
+    output_cache: dict[int, torch.Tensor],
+    ag_zero_cache: dict[tuple[int, int], torch.Tensor],
+) -> tuple[float, float]:
+    """Run the same per-layer/lane collective order as FastAFD serving."""
+    current = torch.cuda.current_stream()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    lane_done = [torch.cuda.Event() for _ in lane_streams]
+    start.record(current)
+    wall_start = time.perf_counter()
+    for stream in lane_streams:
+        stream.wait_event(start)
+    if is_ag:
+        from minisgl.kernel.fp8_quant import per_token_cast_to_fp8
+
+        dispatches: list[list[Any | None]] = [[None for _ in adapters] for _layer in range(layers)]
+        retired: list[tuple[torch.cuda.Event, Any, torch.Tensor]] = []
+
+        def launch_dispatch(layer: int, lane: int) -> None:
+            hidden, ids, topk_weights = inputs[lane]
+            adapter = adapters[lane]
+            stream = lane_streams[lane]
+            with torch.cuda.stream(stream):
+                hidden_fp8, hidden_scale = per_token_cast_to_fp8(
+                    hidden.contiguous(),
+                    use_ue8m0=True,
+                    gran_k=128,
+                    use_packed_ue8m0=True,
+                    backend="cuda",
+                )
+                dispatches[layer][lane] = adapter.dispatch(
+                    hidden_fp8,
+                    ids,
+                    topk_weights,
+                    hidden_states_scale=hidden_scale,
+                    expert_alignment=expert_alignment,
+                    num_max_dispatch_tokens_per_rank=physical_tokens_per_lane,
+                )
+
+        for lane in range(len(adapters)):
+            launch_dispatch(0, lane)
+        for layer in range(layers):
+            for lane, stream in enumerate(lane_streams):
+                dispatch = dispatches[layer][lane]
+                if dispatch is None:
+                    raise RuntimeError(f"missing DeepEP dispatch for layer={layer} lane={lane}")
+                hidden = inputs[lane][0]
+                adapter = adapters[lane]
+                with torch.cuda.stream(stream):
+                    shape = (int(dispatch.hidden_states.shape[0]), profile.hidden_size)
+                    combine_input = ag_zero_cache.get(shape)
+                    if combine_input is None:
+                        combine_input = torch.zeros(
+                            shape,
+                            dtype=torch.bfloat16,
+                            device=hidden.device,
+                        )
+                        ag_zero_cache[shape] = combine_input
+                    output = adapter.combine(combine_input, dispatch)
+                    if profile.routed_scaling_factor != 1.0:
+                        output.mul_(profile.routed_scaling_factor)
+                    output_cache[lane] = output
+                    done = torch.cuda.Event()
+                    done.record(stream)
+                retired.append((done, dispatch, output))
+                if len(retired) >= 4:
+                    retired.pop(0)[0].synchronize()
+                dispatches[layer][lane] = None
+                if layer + 1 < layers:
+                    launch_dispatch(layer + 1, lane)
+        while retired:
+            retired.pop(0)[0].synchronize()
+        for done, stream in zip(lane_done, lane_streams, strict=True):
+            done.record(stream)
+            current.wait_event(done)
+    else:
+        empty_hidden = torch.empty(
+            (0, profile.hidden_size),
+            dtype=torch.float8_e4m3fn,
+            device="cuda",
+        )
+        empty_scale = torch.empty(
+            (0, profile.hidden_size // 128 // 4),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        dispatch_done = [[torch.cuda.Event() for _ in adapters] for _layer in range(layers)]
+        expert_done = [[torch.cuda.Event() for _ in adapters] for _layer in range(layers)]
+        dispatches: list[list[Any | None]] = [[None for _ in adapters] for _layer in range(layers)]
+        expert_outputs: list[list[torch.Tensor | None]] = [
+            [None for _ in adapters] for _layer in range(layers)
+        ]
+        retired: list[tuple[torch.cuda.Event, Any, torch.Tensor]] = []
+
+        def retire_one() -> None:
+            event, _dispatch, _output = retired.pop(0)
+            event.synchronize()
+
+        def launch_dispatch(layer: int, lane: int) -> None:
+            adapter = adapters[lane]
+            stream = lane_streams[lane]
+            with torch.cuda.stream(stream):
+                dispatch = adapter.dispatch(
+                    empty_hidden,
+                    None,
+                    None,
+                    hidden_states_scale=empty_scale,
+                    expert_alignment=expert_alignment,
+                    num_max_dispatch_tokens_per_rank=physical_tokens_per_lane,
+                )
+                dispatch_done[layer][lane].record(stream)
+            dispatches[layer][lane] = dispatch
+
+        for lane in range(len(adapters)):
+            launch_dispatch(0, lane)
+        for layer in range(layers):
+            layer_weights = weights[layer % len(weights)]
+            for lane, stream in enumerate(lane_streams):
+                dispatch = dispatches[layer][lane]
+                if dispatch is None:
+                    raise RuntimeError(f"missing DeepEP dispatch for layer={layer} lane={lane}")
+                with torch.cuda.stream(current):
+                    current.wait_event(dispatch_done[layer][lane])
+                    output = run_deepep_fp4_experts(
+                        profile=profile,
+                        dispatch_output=dispatch,
+                        weights=layer_weights,
+                        expert_alignment=expert_alignment,
+                    )
+                    expert_done[layer][lane].record(current)
+                expert_outputs[layer][lane] = output
+                with torch.cuda.stream(stream):
+                    stream.wait_event(expert_done[layer][lane])
+                    output.record_stream(stream)
+                    adapters[lane].combine(output, dispatch)
+                    done = torch.cuda.Event()
+                    done.record(stream)
+                retired.append((done, dispatch, output))
+                if len(retired) >= 4:
+                    retire_one()
+                dispatches[layer][lane] = None
+                expert_outputs[layer][lane] = None
+                if layer + 1 < layers:
+                    launch_dispatch(layer + 1, lane)
+        while retired:
+            retire_one()
+        for done, stream in zip(lane_done, lane_streams, strict=True):
+            done.record(stream)
+            current.wait_event(done)
+    end.record(current)
+    end.synchronize()
+    return float(start.elapsed_time(end)), (time.perf_counter() - wall_start) * 1000.0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, choices=sorted(MEGAMOE_MODEL_PROFILES))
@@ -370,6 +702,18 @@ def main() -> None:
     parser.add_argument("--layers", type=int, default=0, help="0 means all model MoE layers")
     parser.add_argument("--routing", choices=("balanced", "hotset"), default="balanced")
     parser.add_argument("--hot-expert-fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--backend",
+        choices=("mega", "deepep"),
+        default="mega",
+        help="Measure split MegaMoE or split DeepEP+DeepGEMM",
+    )
+    parser.add_argument(
+        "--weight-slots",
+        type=int,
+        default=0,
+        help="DeepEP FP4 weight sets to allocate; 0 means one set per measured layer",
+    )
     parser.add_argument("--expected-tokens-per-lane", type=int)
     parser.add_argument("--prefetch-mib", type=int, default=0)
     parser.add_argument("--ag-sms", type=int, default=24)
@@ -392,6 +736,10 @@ def main() -> None:
         raise SystemExit("hot-expert-fraction must be in (0, 1]")
     if args.warmups < 1 or args.iterations < 3:
         raise SystemExit("warmups must be >=1 and iterations must be >=3")
+    if args.weight_slots < 0:
+        raise SystemExit("weight-slots must be non-negative")
+    if args.backend == "deepep" and profile.weight_precision != "fp4":
+        raise SystemExit("split DeepEP+DeepGEMM measurement currently requires an FP4 profile")
 
     verify_width = args.mtp_nextn + 1
     sequences_per_lane = args.sequences_per_ag_rank // args.microbatches
@@ -408,46 +756,91 @@ def main() -> None:
             f"WORLD_SIZE={world_size}, expected ag_size+eg_size={args.ag_size + args.eg_size}"
         )
     os.environ["MINISGL_MEGAMOE_AG_SMS"] = str(args.ag_sms)
+    if args.backend == "deepep" and args.microbatches > 1:
+        os.environ["MINISGL_DEEPEP_PER_BUFFER_COMM_STREAM"] = "1"
     torch.cuda.set_device(local_rank)
     dist.init_process_group("nccl", device_id=torch.device("cuda", local_rank))
-
-    from minisgl.moe.megamoe_m2n_afd import MegaMoEM2NAfdAdapter
-
-    adapter = MegaMoEM2NAfdAdapter(
-        group=dist.group.WORLD,
-        ag_size=args.ag_size,
-        eg_size=args.eg_size,
-        real_num_experts=profile.num_routed_experts,
-        hidden_size=profile.hidden_size,
-        intermediate_size=profile.intermediate_size,
-        top_k=profile.routed_top_k,
-        num_max_dispatch_tokens_per_rank=physical_tokens_per_lane,
-        num_lanes=args.microbatches,
-        gate_renormalize=profile.gate_renormalize,
-        shared_experts_per_rank=profile.num_shared_experts,
-        routed_scaling_factor=profile.routed_scaling_factor,
-        weight_precision=profile.weight_precision,
-        activation=profile.activation,
-        activation_alpha=profile.activation_alpha,
-        activation_clamp=profile.activation_clamp,
-        activation_up_bias=profile.activation_up_bias,
-        eg_expected_tokens_override=expected_tokens,
-        eg_prefetch_bytes=args.prefetch_mib << 20,
-    )
     is_ag = rank < args.ag_size
+    backend = MEGAMOE_BACKEND if args.backend == "mega" else DEEPEP_BACKEND
+    megamoe_adapter: Any | None = None
+    adapters: tuple[Any, ...]
+    expert_alignment = 128
+    if backend == MEGAMOE_BACKEND:
+        from minisgl.moe.megamoe_m2n_afd import MegaMoEM2NAfdAdapter
+
+        megamoe_adapter = MegaMoEM2NAfdAdapter(
+            group=dist.group.WORLD,
+            ag_size=args.ag_size,
+            eg_size=args.eg_size,
+            real_num_experts=profile.num_routed_experts,
+            hidden_size=profile.hidden_size,
+            intermediate_size=profile.intermediate_size,
+            top_k=profile.routed_top_k,
+            num_max_dispatch_tokens_per_rank=physical_tokens_per_lane,
+            num_lanes=args.microbatches,
+            gate_renormalize=profile.gate_renormalize,
+            shared_experts_per_rank=profile.num_shared_experts,
+            routed_scaling_factor=profile.routed_scaling_factor,
+            weight_precision=profile.weight_precision,
+            activation=profile.activation,
+            activation_alpha=profile.activation_alpha,
+            activation_clamp=profile.activation_clamp,
+            activation_up_bias=profile.activation_up_bias,
+            eg_expected_tokens_override=expected_tokens,
+            eg_prefetch_bytes=args.prefetch_mib << 20,
+        )
+        adapters = (megamoe_adapter,)
+    else:
+        from minisgl.kernel import deepgemm
+        from minisgl.moe.deepep_m2n_adapter import DeepEPM2NAdapter
+
+        _local_routed, protocol_experts, protocol_topk = protocol_shape(
+            profile,
+            args.eg_size,
+        )
+        deepgemm.set_mk_alignment_for_contiguous_layout(expert_alignment)
+        adapters = tuple(
+            DeepEPM2NAdapter(
+                group=dist.group.WORLD,
+                ag_size=args.ag_size,
+                eg_size=args.eg_size,
+                real_num_experts=protocol_experts,
+                hidden_size=profile.hidden_size,
+                top_k=protocol_topk,
+                num_max_dispatch_tokens_per_rank=physical_tokens_per_lane,
+            )
+            for _lane in range(args.microbatches)
+        )
 
     torch.cuda.reset_peak_memory_stats()
     init_start = time.perf_counter()
-    if not is_ag:
-        register_layers(adapter, profile, layers=layers)
+    deepep_weights: tuple[DeepEPFP4LayerWeights, ...] = ()
+    deepep_weight_slots = layers if args.weight_slots == 0 else min(layers, args.weight_slots)
+    if not is_ag and backend == MEGAMOE_BACKEND:
+        assert megamoe_adapter is not None
+        register_megamoe_layers(megamoe_adapter, profile, layers=layers)
+    elif not is_ag:
+        deepep_weights = tuple(
+            make_deepep_fp4_weights(
+                profile,
+                local_protocol_experts=profile.local_experts(args.eg_size),
+                layer_id=layer_id,
+            )
+            for layer_id in range(deepep_weight_slots)
+        )
     dist.barrier()
     torch.cuda.synchronize()
     initialization_seconds = time.perf_counter() - init_start
     peak_memory_bytes = torch.cuda.max_memory_allocated()
 
     lane_streams = tuple(torch.cuda.Stream() for _ in range(args.microbatches))
+    route_experts = (
+        profile.num_routed_experts
+        if backend == MEGAMOE_BACKEND
+        else profile.protocol_num_experts(args.eg_size)
+    )
     local_route_counts = torch.zeros(
-        profile.num_routed_experts,
+        route_experts,
         dtype=torch.int64,
         device="cuda",
     )
@@ -455,14 +848,25 @@ def main() -> None:
     if is_ag:
         materialized = []
         for lane in range(args.microbatches):
-            ids, weights, counts = make_routes(
-                profile,
-                physical_tokens_per_lane,
-                rank=rank,
-                lane=lane,
-                routing=args.routing,
-                hot_expert_fraction=args.hot_expert_fraction,
-            )
+            if backend == MEGAMOE_BACKEND:
+                ids, weights, counts = make_routes(
+                    profile,
+                    physical_tokens_per_lane,
+                    rank=rank,
+                    lane=lane,
+                    routing=args.routing,
+                    hot_expert_fraction=args.hot_expert_fraction,
+                )
+            else:
+                ids, weights, counts = make_deepep_protocol_routes(
+                    profile,
+                    physical_tokens_per_lane,
+                    rank=rank,
+                    lane=lane,
+                    eg_size=args.eg_size,
+                    routing=args.routing,
+                    hot_expert_fraction=args.hot_expert_fraction,
+                )
             local_route_counts += counts
             input_seed = INPUT_SEED_BASE + rank * 4 + lane
             input_generator = torch.Generator(device="cuda")
@@ -481,17 +885,38 @@ def main() -> None:
         inputs = tuple(materialized)
     dist.all_reduce(local_route_counts, op=dist.ReduceOp.SUM)
 
-    for _ in range(args.warmups):
-        dist.barrier()
-        run_stage(
-            adapter=adapter,
+    output_cache: dict[int, torch.Tensor] = {}
+    ag_zero_cache: dict[tuple[int, int], torch.Tensor] = {}
+
+    def run_once() -> tuple[float, float]:
+        if backend == MEGAMOE_BACKEND:
+            assert megamoe_adapter is not None
+            return run_megamoe_stage(
+                adapter=megamoe_adapter,
+                is_ag=is_ag,
+                rank=rank,
+                layers=layers,
+                expected_tokens_per_lane=expected_tokens,
+                lane_streams=lane_streams,
+                inputs=inputs,
+            )
+        return run_deepep_stage(
+            profile=profile,
+            adapters=adapters,
             is_ag=is_ag,
-            rank=rank,
             layers=layers,
-            expected_tokens_per_lane=expected_tokens,
+            physical_tokens_per_lane=physical_tokens_per_lane,
             lane_streams=lane_streams,
             inputs=inputs,
+            weights=deepep_weights,
+            expert_alignment=expert_alignment,
+            output_cache=output_cache,
+            ag_zero_cache=ag_zero_cache,
         )
+
+    for _ in range(args.warmups):
+        dist.barrier()
+        run_once()
     dist.barrier()
 
     local_cuda: list[float] = []
@@ -499,15 +924,7 @@ def main() -> None:
     gathered_iterations: list[list[dict[str, float]]] = []
     for _ in range(args.iterations):
         dist.barrier()
-        cuda_ms, wall_ms = run_stage(
-            adapter=adapter,
-            is_ag=is_ag,
-            rank=rank,
-            layers=layers,
-            expected_tokens_per_lane=expected_tokens,
-            lane_streams=lane_streams,
-            inputs=inputs,
-        )
+        cuda_ms, wall_ms = run_once()
         local_cuda.append(cuda_ms)
         local_wall.append(wall_ms)
         gathered = [None] * world_size if rank == 0 else None
@@ -523,7 +940,11 @@ def main() -> None:
     finite = True
     output_abs_mean = None
     if is_ag:
-        outputs = tuple(adapter._y_cache.values())
+        outputs = (
+            tuple(megamoe_adapter._y_cache.values())
+            if backend == MEGAMOE_BACKEND
+            else tuple(output_cache.values())
+        )
         finite = all(bool(torch.isfinite(output).all().item()) for output in outputs)
         output_abs_mean = statistics.mean(
             float(output.float().abs().mean().item()) for output in outputs
@@ -544,17 +965,49 @@ def main() -> None:
         stage_cuda = [max(sample["cuda_ms"] for sample in rows) for rows in gathered_iterations]
         stage_wall = [max(sample["wall_ms"] for sample in rows) for rows in gathered_iterations]
         stage_summary = summarize(stage_cuda)
+        if backend == MEGAMOE_BACKEND:
+            measurement_boundary = (
+                "split AFD MoE stage: A-side fused block-32 FP8 quant, dispatch, wait, "
+                "top-k combine and routed-output scaling; F-side persistent fused "
+                "FP8xFP4 expert L1, model activation, requant, L2 and return; includes "
+                "the fused replicated shared expert when declared; excludes router, "
+                "attention, dense-only layers, residual, sampling and coordinator"
+            )
+            assert megamoe_adapter is not None
+            kernel_tuning = {
+                "expected_tokens_per_lane": expected_tokens,
+                "expected_tokens_source": megamoe_adapter.eg_expected_tokens_source,
+                "prefetch_mib": args.prefetch_mib,
+                "ag_sms": args.ag_sms,
+            }
+            backend_implementation = "FastAFD MegaMoE M2N persistent split kernel"
+        else:
+            measurement_boundary = (
+                "split AFD MoE stage: A-side block-128 FP8 quant, DeepEP union dispatch, "
+                "zero-source combine and routed-output scaling; F-side psum-layout "
+                "FP8xFP4 DeepGEMM L1, model activation with top-k weighting, requant, "
+                "L2 and DeepEP return; includes one protocol shared expert per F rank "
+                "when declared; excludes router, attention, dense-only layers, residual, "
+                "sampling and coordinator"
+            )
+            kernel_tuning = {
+                "expert_alignment": expert_alignment,
+                "input_quantization": "E4M3 with packed UE8M0 block-128 scales",
+                "weight_quantization": "E2M1 with UE8M0 block-32 scales",
+                "weight_slots": deepep_weight_slots,
+                "per_buffer_comm_stream": os.environ.get(
+                    "MINISGL_DEEPEP_PER_BUFFER_COMM_STREAM",
+                    "0",
+                ),
+            }
+            backend_implementation = "FastAFD DeepEP M2N plus psum-layout DeepGEMM"
         payload = {
-            "schema": "fastafd.megamoe-m2n-model-benchmark.v1",
+            "schema": SPLIT_SCHEMA,
             "generated_at": utc_now(),
             "system_label": os.environ.get("MEASUREMENT_SYSTEM", "unspecified"),
-            "measurement_boundary": (
-                "split AFD MoE stage: A-side FP8 quant, route dispatch, wait, top-k combine, "
-                "and routed-output scaling; "
-                "F-side persistent expert L1, model-specific activation, requant, L2, and return; "
-                "includes fused replicated shared expert when the profile declares one; excludes "
-                "router, attention, dense-only layers, residual, sampling, and coordinator"
-            ),
+            "moe_backend": backend,
+            "backend_implementation": backend_implementation,
+            "measurement_boundary": measurement_boundary,
             "model_profile": asdict(profile),
             "topology": {
                 "world_size": world_size,
@@ -585,6 +1038,11 @@ def main() -> None:
                 "routing": args.routing,
                 "hot_expert_fraction": args.hot_expert_fraction,
                 "routing_load": route_summary(local_route_counts.cpu()),
+                "routing_identity": (
+                    "model routed experts; MegaMoE injects shared route in the AG kernel"
+                    if backend == MEGAMOE_BACKEND
+                    else "per-F-rank protocol experts including the explicit shared route"
+                ),
                 "input_policy": (
                     "fixed deterministic representative hidden state per A-rank and lane; "
                     "the same input is reused independently for every measured MoE layer"
@@ -592,12 +1050,7 @@ def main() -> None:
                 "input_seed_base": INPUT_SEED_BASE,
                 "input_seed_formula": "input_seed_base + ag_rank * 4 + lane",
             },
-            "kernel_tuning": {
-                "expected_tokens_per_lane": expected_tokens,
-                "expected_tokens_source": adapter.eg_expected_tokens_source,
-                "prefetch_mib": args.prefetch_mib,
-                "ag_sms": args.ag_sms,
-            },
+            "kernel_tuning": kernel_tuning,
             "warmups": args.warmups,
             "iterations": args.iterations,
             "stage_cuda": stage_summary,
@@ -614,6 +1067,13 @@ def main() -> None:
             "ag_output_abs_mean_by_rank": output_means,
             "stable": bool(stage_summary["cv_percent"] <= 3.0 and all(finite_all)),
             "stability_contract": "stage CUDA CV <= 3% and finite output on every rank",
+            "eligible_for_profile": bool(
+                backend == MEGAMOE_BACKEND or deepep_weight_slots == layers
+            ),
+            "qualification_contract": (
+                "stable, finite, and one resident weight set per measured layer; "
+                "a reduced DeepEP weight-slot run is diagnostic only"
+            ),
             "initialization_seconds_by_rank": init_times,
             "peak_cuda_memory_bytes_by_rank": peak_memories,
             "source": source_provenance(),
@@ -624,7 +1084,8 @@ def main() -> None:
         print(json.dumps({"output": str(args.output), "stage_cuda": stage_summary}, indent=2))
 
     dist.barrier()
-    adapter.destroy()
+    for adapter in dict.fromkeys(adapters):
+        adapter.destroy()
     dist.destroy_process_group()
 
 

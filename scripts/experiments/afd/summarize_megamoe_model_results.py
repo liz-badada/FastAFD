@@ -13,13 +13,18 @@ from pathlib import Path
 from typing import Any
 
 COLOCATED_SCHEMA = "fastafd.megamoe-colocated-model-benchmark.v2"
-SPLIT_SCHEMA = "fastafd.megamoe-m2n-model-benchmark.v1"
+LEGACY_SPLIT_SCHEMA = "fastafd.megamoe-m2n-model-benchmark.v1"
+SPLIT_SCHEMA = "fastafd.moe-m2n-model-benchmark.v2"
+MEGAMOE_BACKEND = "megamoe"
+DEEPEP_BACKEND = "deepep_deepgemm"
 
 
 @dataclass(frozen=True)
 class ResultRow:
     path: str
     stage: str
+    moe_backend: str
+    backend_stack: str
     model: str
     model_path: str
     hidden_size: int
@@ -35,13 +40,10 @@ class ResultRow:
     mtp_nextn: int
     microbatches: int
     layers: int
-    mega_p50_ms: float
-    reference_p50_ms: float | None
-    reference_stack: str | None
-    speedup: float | None
-    speedup_lower_bound: float | None
-    mega_cv_percent: float
-    reference_cv_percent: float | None
+    latency_p50_ms: float
+    speedup_deepep_over_megamoe: float | None
+    speedup_lower_bound_deepep_over_megamoe: float | None
+    cv_percent: float
     correctness: bool | None
     stable: bool
     eligible: bool
@@ -73,11 +75,11 @@ def _float(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
-def parse_result(path: Path) -> ResultRow | None:
+def parse_results(path: Path) -> list[ResultRow]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     schema = payload.get("schema")
-    if schema not in {COLOCATED_SCHEMA, SPLIT_SCHEMA}:
-        return None
+    if schema not in {COLOCATED_SCHEMA, LEGACY_SPLIT_SCHEMA, SPLIT_SCHEMA}:
+        return []
     profile = payload["model_profile"]
     workload = payload["workload"]
     topology = payload["topology"]
@@ -88,9 +90,7 @@ def parse_result(path: Path) -> ResultRow | None:
         "gpu_name": str(provenance.get("gpu_name", "unknown")),
         "torch_version": str(provenance.get("torch", "unknown")),
         "cuda_runtime": str(provenance.get("cuda_runtime", "unknown")),
-        "driver_power_clocks_memory": str(
-            provenance.get("driver_power_clocks_memory", "unknown")
-        ),
+        "driver_power_clocks_memory": str(provenance.get("driver_power_clocks_memory", "unknown")),
         "container_image": str(provenance.get("container_image", "unknown")),
         "slurm_partition": str(provenance.get("slurm_partition", "unknown")),
         "slurm_job_id": str(provenance.get("slurm_job_id", "unknown")),
@@ -99,14 +99,84 @@ def parse_result(path: Path) -> ResultRow | None:
     if schema == COLOCATED_SCHEMA:
         backends = payload["backend_results"]
         if "mega" not in backends:
-            return None
+            return []
         mega = backends["mega"]
         reference = backends.get("deepep")
         reference_metadata = payload.get("deepep_backend") or {}
         ep_size = int(topology["ep_size"])
-        return ResultRow(
+        shared = {
+            "path": str(path),
+            "stage": "agg",
+            "model": str(profile["key"]),
+            "model_path": str(profile["simulation_model_path"]),
+            "hidden_size": int(profile["hidden_size"]),
+            "intermediate_size": int(profile["intermediate_size"]),
+            "routed_experts": int(profile["num_routed_experts"]),
+            "routed_top_k": int(profile["routed_top_k"]),
+            "shared_experts": int(profile["num_shared_experts"]),
+            "activation": str(profile["activation"]),
+            "precision": str(profile.get("moe_quant_contract", profile["weight_precision"])),
+            "system": str(payload.get("system_label", "unspecified")),
+            "topology": f"ep{ep_size}",
+            "logical_batch": int(workload["logical_tokens_per_rank"]),
+            "mtp_nextn": int(workload["mtp_nextn"]),
+            "microbatches": 1,
+            "layers": int(workload["layers"]),
+            "speedup_deepep_over_megamoe": _float(payload.get("speedup_deepep_over_megamoe")),
+            "speedup_lower_bound_deepep_over_megamoe": _float(
+                payload.get("speedup_lower_bound_deepep_over_megamoe")
+            ),
+            "correctness": payload.get("correctness_passed"),
+            "eligible": bool(payload.get("eligible_for_profile", False)),
+            "source_commit": str(source.get("commit", "")),
+            "source_tree_sha256": str(source.get("source_tree_sha256", "")),
+            **environment,
+        }
+        rows = [
+            ResultRow(
+                moe_backend=MEGAMOE_BACKEND,
+                backend_stack="FastAFD MegaMoE",
+                latency_p50_ms=float(mega["stage_cuda"]["p50_ms"]),
+                cv_percent=float(mega["stage_cuda"]["cv_percent"]),
+                stable=bool(mega["stable"]),
+                **shared,
+            )
+        ]
+        if reference is not None:
+            rows.append(
+                ResultRow(
+                    moe_backend=DEEPEP_BACKEND,
+                    backend_stack=(
+                        f"DeepEP {reference_metadata.get('deep_ep_version', 'unknown')} / "
+                        f"SGLang {reference_metadata.get('sglang_version', 'unknown')}"
+                    ),
+                    latency_p50_ms=float(reference["stage_cuda"]["p50_ms"]),
+                    cv_percent=float(reference["stage_cuda"]["cv_percent"]),
+                    stable=bool(reference["stable"]),
+                    **shared,
+                )
+            )
+        return rows
+
+    stage = payload["stage_cuda"]
+    ag_size = int(topology["ag_size"])
+    eg_size = int(topology["eg_size"])
+    backend = (
+        MEGAMOE_BACKEND if schema == LEGACY_SPLIT_SCHEMA else str(payload.get("moe_backend", ""))
+    )
+    if backend not in {MEGAMOE_BACKEND, DEEPEP_BACKEND}:
+        raise ValueError(f"unsupported split MoE backend {backend!r} in {path}")
+    return [
+        ResultRow(
             path=str(path),
-            stage="agg",
+            stage="afd",
+            moe_backend=backend,
+            backend_stack=str(
+                payload.get(
+                    "backend_implementation",
+                    "FastAFD MegaMoE M2N" if backend == MEGAMOE_BACKEND else "unknown",
+                )
+            ),
             model=str(profile["key"]),
             model_path=str(profile["simulation_model_path"]),
             hidden_size=int(profile["hidden_size"]),
@@ -117,72 +187,28 @@ def parse_result(path: Path) -> ResultRow | None:
             activation=str(profile["activation"]),
             precision=str(profile.get("moe_quant_contract", profile["weight_precision"])),
             system=str(payload.get("system_label", "unspecified")),
-            topology=f"ep{ep_size}",
-            logical_batch=int(workload["logical_tokens_per_rank"]),
+            topology=f"{ag_size}A{eg_size}F",
+            logical_batch=int(workload["sequences_per_ag_rank"]),
             mtp_nextn=int(workload["mtp_nextn"]),
-            microbatches=1,
+            microbatches=int(workload["microbatches"]),
             layers=int(workload["layers"]),
-            mega_p50_ms=float(mega["stage_cuda"]["p50_ms"]),
-            reference_p50_ms=(
-                None if reference is None else float(reference["stage_cuda"]["p50_ms"])
-            ),
-            reference_stack=(
-                None
-                if reference is None
-                else (
-                    f"DeepEP {reference_metadata.get('deep_ep_version', 'unknown')} / "
-                    f"SGLang {reference_metadata.get('sglang_version', 'unknown')}"
+            latency_p50_ms=float(stage["p50_ms"]),
+            speedup_deepep_over_megamoe=None,
+            speedup_lower_bound_deepep_over_megamoe=None,
+            cv_percent=float(stage["cv_percent"]),
+            correctness=None,
+            stable=bool(payload["stable"]),
+            eligible=bool(
+                payload.get(
+                    "eligible_for_profile",
+                    schema == LEGACY_SPLIT_SCHEMA,
                 )
             ),
-            speedup=_float(payload.get("speedup_deepep_over_megamoe")),
-            speedup_lower_bound=_float(payload.get("speedup_lower_bound_deepep_over_megamoe")),
-            mega_cv_percent=float(mega["stage_cuda"]["cv_percent"]),
-            reference_cv_percent=(
-                None if reference is None else float(reference["stage_cuda"]["cv_percent"])
-            ),
-            correctness=payload.get("correctness_passed"),
-            stable=bool(mega["stable"]),
-            eligible=bool(payload.get("eligible_for_profile", False)),
             source_commit=str(source.get("commit", "")),
             source_tree_sha256=str(source.get("source_tree_sha256", "")),
             **environment,
         )
-
-    stage = payload["stage_cuda"]
-    ag_size = int(topology["ag_size"])
-    eg_size = int(topology["eg_size"])
-    return ResultRow(
-        path=str(path),
-        stage="afd",
-        model=str(profile["key"]),
-        model_path=str(profile["simulation_model_path"]),
-        hidden_size=int(profile["hidden_size"]),
-        intermediate_size=int(profile["intermediate_size"]),
-        routed_experts=int(profile["num_routed_experts"]),
-        routed_top_k=int(profile["routed_top_k"]),
-        shared_experts=int(profile["num_shared_experts"]),
-        activation=str(profile["activation"]),
-        precision=str(profile.get("moe_quant_contract", profile["weight_precision"])),
-        system=str(payload.get("system_label", "unspecified")),
-        topology=f"{ag_size}A{eg_size}F",
-        logical_batch=int(workload["sequences_per_ag_rank"]),
-        mtp_nextn=int(workload["mtp_nextn"]),
-        microbatches=int(workload["microbatches"]),
-        layers=int(workload["layers"]),
-        mega_p50_ms=float(stage["p50_ms"]),
-        reference_p50_ms=None,
-        reference_stack=None,
-        speedup=None,
-        speedup_lower_bound=None,
-        mega_cv_percent=float(stage["cv_percent"]),
-        reference_cv_percent=None,
-        correctness=None,
-        stable=bool(payload["stable"]),
-        eligible=False,
-        source_commit=str(source.get("commit", "")),
-        source_tree_sha256=str(source.get("source_tree_sha256", "")),
-        **environment,
-    )
+    ]
 
 
 def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
@@ -191,6 +217,7 @@ def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
             row.model,
             row.precision,
             row.system,
+            row.moe_backend,
             row.logical_batch,
             row.mtp_nextn,
             row.layers,
@@ -220,11 +247,15 @@ def paired_split_eligibility(rows: list[ResultRow]) -> list[ResultRow]:
                     row.__dict__
                     | {
                         "correctness": None if reference is None else reference.correctness,
-                        "speedup": None if reference is None else reference.speedup,
-                        "speedup_lower_bound": (
-                            None if reference is None else reference.speedup_lower_bound
+                        "speedup_deepep_over_megamoe": (
+                            None if reference is None else reference.speedup_deepep_over_megamoe
                         ),
-                        "eligible": bool(row.stable and reference is not None),
+                        "speedup_lower_bound_deepep_over_megamoe": (
+                            None
+                            if reference is None
+                            else reference.speedup_lower_bound_deepep_over_megamoe
+                        ),
+                        "eligible": bool(row.stable and row.eligible and reference is not None),
                     }
                 )
             )
@@ -241,6 +272,7 @@ def validate_unique_profile_keys(rows: list[ResultRow]) -> None:
             row.model_path,
             row.system,
             row.stage,
+            row.moe_backend,
             row.topology,
             row.logical_batch,
             row.mtp_nextn,
@@ -287,6 +319,7 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     columns = (
         "model",
         "stage",
+        "moe_backend",
         "precision",
         "system",
         "topology",
@@ -295,23 +328,21 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "mtp_nextn",
         "microbatches",
         "layers",
-        "mega_p50_ms",
-        "reference_p50_ms",
-        "reference_stack",
-        "speedup",
-        "speedup_lower_bound",
-        "mega_cv_percent",
-        "reference_cv_percent",
+        "latency_p50_ms",
+        "backend_stack",
+        "speedup_deepep_over_megamoe",
+        "speedup_lower_bound_deepep_over_megamoe",
+        "cv_percent",
         "correctness",
         "eligible",
         "source_commit",
     )
     lines = [
-        "# MegaMoE measured latency reference",
+        "# Measured AFD MoE backend latency reference",
         "",
         "Only exact measured points are listed. An AFD row is eligible only when it is stable and has a correctness-passing colocated MegaMoE-versus-DeepEP result at the same model, precision, system, logical source-rank batch, MTP nextN, and layer count.",
         "",
-        "The speedup columns compare complete colocated MoE-stage backend paths, including production quantization, dispatch/combine, expert alignment, scatter/gather, and GEMMs. They are not GEMM-only or end-to-end serving speedups. The AIC profile consumes the absolute MegaMoE latency.",
+        "The speedup columns compare complete colocated MoE-stage backend paths, including production quantization, dispatch/combine, expert alignment, scatter/gather, and GEMMs. They are not GEMM-only or end-to-end serving speedups. The AIC profile consumes each backend's absolute latency.",
         "",
         "## Model contracts",
         "",
@@ -339,45 +370,47 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
             "",
             "## Backend summary",
             "",
-            "| model | precision | system | colocated points | split points | colocated MegaMoE p50 ms | split MegaMoE p50 ms | DeepEP / MegaMoE median | conservative lower bound | max MegaMoE CV % | reference stack |",
-            "| --- | --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | --- |",
+            "| model | backend | precision | system | colocated points | split points | colocated p50 ms | split p50 ms | DeepEP / MegaMoE median | conservative lower bound | max CV % | backend stack |",
+            "| --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | --- |",
         ]
     )
     for model in sorted({row.model for row in rows}):
-        model_rows = [row for row in rows if row.model == model and row.eligible]
-        colocated = [row for row in model_rows if row.stage == "agg"]
-        split = [row for row in model_rows if row.stage == "afd"]
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    model,
-                    ", ".join(sorted({row.precision for row in model_rows})),
-                    ", ".join(sorted({row.system for row in model_rows})),
-                    str(len(colocated)),
-                    str(len(split)),
-                    format_range(row.mega_p50_ms for row in colocated),
-                    format_range(row.mega_p50_ms for row in split),
-                    format_range(row.speedup for row in colocated if row.speedup is not None),
-                    format_range(
-                        row.speedup_lower_bound
-                        for row in colocated
-                        if row.speedup_lower_bound is not None
-                    ),
-                    format_value(max((row.mega_cv_percent for row in model_rows), default=None)),
-                    ", ".join(
-                        sorted(
-                            {
-                                row.reference_stack
-                                for row in colocated
-                                if row.reference_stack is not None
-                            }
-                        )
-                    ),
-                ]
+        for backend in sorted({row.moe_backend for row in rows if row.model == model}):
+            model_rows = [
+                row
+                for row in rows
+                if row.model == model and row.moe_backend == backend and row.eligible
+            ]
+            colocated = [row for row in model_rows if row.stage == "agg"]
+            split = [row for row in model_rows if row.stage == "afd"]
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        model,
+                        backend,
+                        ", ".join(sorted({row.precision for row in model_rows})),
+                        ", ".join(sorted({row.system for row in model_rows})),
+                        str(len(colocated)),
+                        str(len(split)),
+                        format_range(row.latency_p50_ms for row in colocated),
+                        format_range(row.latency_p50_ms for row in split),
+                        format_range(
+                            row.speedup_deepep_over_megamoe
+                            for row in colocated
+                            if row.speedup_deepep_over_megamoe is not None
+                        ),
+                        format_range(
+                            row.speedup_lower_bound_deepep_over_megamoe
+                            for row in colocated
+                            if row.speedup_lower_bound_deepep_over_megamoe is not None
+                        ),
+                        format_value(max((row.cv_percent for row in model_rows), default=None)),
+                        ", ".join(sorted({row.backend_stack for row in model_rows})),
+                    ]
+                )
+                + " |"
             )
-            + " |"
-        )
     environments: dict[tuple[str, ...], dict[str, set[str]]] = defaultdict(
         lambda: {"jobs": set(), "nodes": set(), "commits": set(), "trees": set()}
     )
@@ -440,10 +473,17 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
 
 
 def write_profile(path: Path, rows: list[ResultRow]) -> None:
-    entries = []
-    for row in rows:
-        if not row.eligible:
-            continue
+    entries: list[dict[str, Any]] = []
+
+    def add_entry(
+        row: ResultRow,
+        *,
+        moe_backend: str,
+        latency_ms: float,
+        matched_speedup: float | None,
+        matched_speedup_lower_bound: float | None,
+        evidence: str,
+    ) -> None:
         entries.append(
             {
                 "model_path": row.model_path,
@@ -456,17 +496,14 @@ def write_profile(path: Path, rows: list[ResultRow]) -> None:
                 "microbatches": row.microbatches,
                 "moe_layers": row.layers,
                 "moe_precision": row.precision,
-                "latency_ms": row.mega_p50_ms,
+                "moe_backend": moe_backend,
+                "latency_ms": latency_ms,
                 "validation": {
                     "stable": row.stable,
                     "correctness": row.correctness,
-                    "matched_speedup": row.speedup,
-                    "matched_speedup_lower_bound": row.speedup_lower_bound,
-                    "evidence": (
-                        "same-point-colocated"
-                        if row.stage == "agg"
-                        else "same-model-system-precision-colocated-plus-stable-split"
-                    ),
+                    "matched_speedup": matched_speedup,
+                    "matched_speedup_lower_bound": matched_speedup_lower_bound,
+                    "evidence": evidence,
                 },
                 "source": {
                     "commit": row.source_commit,
@@ -475,8 +512,30 @@ def write_profile(path: Path, rows: list[ResultRow]) -> None:
                 },
             }
         )
+
+    for row in rows:
+        if not row.eligible:
+            continue
+        add_entry(
+            row,
+            moe_backend=row.moe_backend,
+            latency_ms=row.latency_p50_ms,
+            matched_speedup=(
+                row.speedup_deepep_over_megamoe if row.moe_backend == MEGAMOE_BACKEND else None
+            ),
+            matched_speedup_lower_bound=(
+                row.speedup_lower_bound_deepep_over_megamoe
+                if row.moe_backend == MEGAMOE_BACKEND
+                else None
+            ),
+            evidence=(
+                "same-point-colocated"
+                if row.stage == "agg"
+                else "same-backend-model-system-precision-colocated-plus-stable-split"
+            ),
+        )
     payload = {
-        "schema": "aic.afd-moe-stage-profile.v1",
+        "schema": "aic.afd-moe-stage-profile.v2",
         "lookup_policy": "exact-only",
         "entries": entries,
     }
@@ -495,7 +554,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    rows = [row for path in result_files(args.inputs) if (row := parse_result(path)) is not None]
+    rows = [row for path in result_files(args.inputs) for row in parse_results(path)]
     rows = paired_split_eligibility(rows)
     validate_unique_profile_keys(rows)
     if args.csv is not None:
