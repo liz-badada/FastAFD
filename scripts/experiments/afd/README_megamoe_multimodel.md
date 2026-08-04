@@ -166,6 +166,11 @@ name.
      --profile /path/to/afd_moe_stage_profile_extended.json
    ```
 
+   When refreshing the colocated AGG matrix while retaining qualified split
+   measurements, include the new colocated JSON directory and add
+   `--replace-base-stage agg`. The exporter removes the old AGG entries before
+   adding the new rows; duplicate keys within the new input still fail.
+
    | Output | Use |
    | --- | --- |
    | `megamoe_latency_reference.md` | Compact human-readable latency and qualification table. |

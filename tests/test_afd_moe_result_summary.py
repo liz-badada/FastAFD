@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = (
     Path(__file__).parents[1]
@@ -218,3 +219,49 @@ def test_base_profile_rejects_duplicate_incremental_key(tmp_path: Path) -> None:
         assert "duplicates an exact key" in str(error)
     else:
         raise AssertionError("duplicate incremental exact key was accepted")
+
+
+def test_main_can_replace_base_stage(tmp_path: Path) -> None:
+    old = _common_payload() | {
+        "schema": summary.COLOCATED_SCHEMA,
+        "topology": {"ep_size": 8},
+        "workload": {"logical_tokens_per_rank": 48, "mtp_nextn": 1, "layers": 94},
+        "backend_results": {
+            "mega": {"stage_cuda": {"p50_ms": 7.5, "cv_percent": 1.0}, "stable": True},
+            "deepep": {
+                "stage_cuda": {"p50_ms": 10.5, "cv_percent": 1.5},
+                "stable": True,
+            },
+        },
+        "deepep_backend": {"deep_ep_version": "1", "sglang_version": "2"},
+        "correctness_passed": True,
+        "eligible_for_profile": True,
+    }
+    old_rows = summary.parse_results(_write(tmp_path / "old.json", old))
+    base_path = tmp_path / "base.json"
+    summary.write_profile(base_path, old_rows)
+
+    new = json.loads(json.dumps(old))
+    new["backend_results"]["mega"]["stage_cuda"]["p50_ms"] = 6.5
+    new_path = _write(tmp_path / "new.json", new)
+    profile_path = tmp_path / "refreshed.json"
+    markdown_path = tmp_path / "refreshed.md"
+    argv = [
+        str(SCRIPT),
+        str(new_path),
+        "--base-profile",
+        str(base_path),
+        "--replace-base-stage",
+        "agg",
+        "--markdown",
+        str(markdown_path),
+        "--profile",
+        str(profile_path),
+    ]
+    with patch.object(sys, "argv", argv):
+        assert summary.main() == 0
+
+    entries = json.loads(profile_path.read_text(encoding="utf-8"))["entries"]
+    assert len(entries) == 2
+    mega = next(entry for entry in entries if entry["moe_backend"] == summary.MEGAMOE_BACKEND)
+    assert mega["latency_ms"] == 6.5

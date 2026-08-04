@@ -633,12 +633,21 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Validated exact profile to retain and use for colocated correctness gates",
     )
+    parser.add_argument(
+        "--replace-base-stage",
+        action="append",
+        choices=("agg", "afd"),
+        default=[],
+        help="Drop this stage from the base profile before adding newly measured rows",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     base_entries = load_base_profile(args.base_profile)
+    replaced_stages = set(args.replace_base_stage)
+    base_entries = [entry for entry in base_entries if entry["stage"] not in replaced_stages]
     rows = [row for path in result_files(args.inputs) for row in parse_results(path)]
     rows = paired_split_eligibility(rows, base_entries=base_entries)
     validate_unique_profile_keys(rows)
