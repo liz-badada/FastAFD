@@ -158,6 +158,22 @@ name.
    measurements; using them for another system requires an explicitly labeled
    projection.
 
+   Measure the matching high-load colocated envelope used by AGG with the
+   checked-in 20-case matrix:
+
+   ```bash
+   SOURCE_ROOT=/path/to/FastAFD \
+   RUN_SCRIPT=run_megamoe_colocated_model_case_matrix.sh \
+   CASE_MATRIX=/workspace/FastAFD/scripts/experiments/afd/reference/b200_sxm/high_load_colocated_case_matrix.txt \
+   RESULTS_DIR=/workspace/results/megamoe-colocated-high-load \
+   WARMUPS=30 ITERATIONS=40 \
+   sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+   ```
+
+   Each row is `model tokens_per_rank mtp_nextn backend`. The matrix uses
+   `backend=both`, so MegaMoE and DeepEP+DeepGEMM are measured from the same
+   process and input for a matched comparison.
+
    Set `BACKEND_GRID="deepep both"` on the colocated suite to run the
    reference-only and matched paths in the same allocation when auditing
    backend-state or node-to-node stability.

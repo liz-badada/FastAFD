@@ -31,7 +31,7 @@ case "${source_root}" in
 esac
 container_source_root="/workspace/${source_root#"${host_root}/"}"
 case "${run_script}" in
-  run_megamoe_m2n_model_benchmark.sh|run_megamoe_m2n_model_smoke_suite.sh|run_megamoe_m2n_model_suite.sh|run_megamoe_m2n_model_case_matrix.sh|run_megamoe_colocated_model_benchmark.sh|run_megamoe_colocated_model_smoke_suite.sh|run_megamoe_colocated_model_suite.sh) ;;
+  run_megamoe_m2n_model_benchmark.sh|run_megamoe_m2n_model_smoke_suite.sh|run_megamoe_m2n_model_suite.sh|run_megamoe_m2n_model_case_matrix.sh|run_megamoe_colocated_model_benchmark.sh|run_megamoe_colocated_model_smoke_suite.sh|run_megamoe_colocated_model_suite.sh|run_megamoe_colocated_model_case_matrix.sh) ;;
   *)
     echo "Unsupported RUN_SCRIPT: ${run_script}" >&2
     exit 2
