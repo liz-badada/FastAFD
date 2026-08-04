@@ -37,6 +37,7 @@ if [[ ${backend} == deepep ]]; then
   export NCCL_ROOT=${nccl_root}
   export LD_LIBRARY_PATH="${nccl_root}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   export LD_PRELOAD="${nccl_root}/lib/libnccl.so.2${LD_PRELOAD:+:${LD_PRELOAD}}"
+  export EP_DISABLE_GIN=${EP_DISABLE_GIN:-1}
 fi
 
 suffix="${model}_${backend}_${ag_size}a${eg_size}f_s${sequences_per_ag_rank}_n${mtp_nextn}_mb${microbatches}_${routing}"

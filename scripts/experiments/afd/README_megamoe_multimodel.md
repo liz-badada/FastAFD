@@ -33,6 +33,8 @@ It fails closed when the required headers are absent instead of compiling
 against an older host-only NCCL package. Match the NCCL wheel's CUDA major to
 the container; the command above targets the documented CUDA 12.9 container.
 Set `PYTHON_DEPS_ROOT` only when using a different mounted dependency directory.
+The single-node launcher defaults `EP_DISABLE_GIN=1`, using DeepEP's official
+non-GIN NVLink path; set it to `0` only on a GIN-capable deployment.
 
 The model registry provides split-stage contracts for:
 
