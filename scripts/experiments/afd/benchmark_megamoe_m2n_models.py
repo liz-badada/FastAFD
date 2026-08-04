@@ -1001,6 +1001,10 @@ def main() -> None:
                 ),
             }
             backend_implementation = "FastAFD DeepEP M2N plus psum-layout DeepGEMM"
+        stable = bool(stage_summary["cv_percent"] <= 3.0 and all(finite_all))
+        full_resident_weights = bool(
+            backend == MEGAMOE_BACKEND or deepep_weight_slots == layers
+        )
         payload = {
             "schema": SPLIT_SCHEMA,
             "generated_at": utc_now(),
@@ -1065,11 +1069,9 @@ def main() -> None:
             ],
             "all_outputs_finite_by_rank": finite_all,
             "ag_output_abs_mean_by_rank": output_means,
-            "stable": bool(stage_summary["cv_percent"] <= 3.0 and all(finite_all)),
+            "stable": stable,
             "stability_contract": "stage CUDA CV <= 3% and finite output on every rank",
-            "eligible_for_profile": bool(
-                backend == MEGAMOE_BACKEND or deepep_weight_slots == layers
-            ),
+            "eligible_for_profile": bool(stable and full_resident_weights),
             "qualification_contract": (
                 "stable, finite, and one resident weight set per measured layer; "
                 "a reduced DeepEP weight-slot run is diagnostic only"

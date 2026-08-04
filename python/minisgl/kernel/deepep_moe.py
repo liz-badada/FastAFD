@@ -3,12 +3,13 @@ from __future__ import annotations
 import functools
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
-from importlib.metadata import distribution
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -35,16 +36,37 @@ def _source_files(root: Path) -> list[Path]:
 
 
 def _resolve_nccl_layout() -> tuple[Path, Path]:
-    pkg_root = Path(distribution("nvidia-nccl-cu13").locate_file(""))
-    nccl_root = pkg_root / "nvidia" / "nccl"
-    include_dir = nccl_root / "include"
-    lib_dir = nccl_root / "lib"
-    host_lib = lib_dir / "libnccl.so.2"
-    if not include_dir.exists():
-        raise RuntimeError(f"Missing NCCL include directory: {include_dir}")
-    if not host_lib.exists():
-        raise RuntimeError(f"Missing NCCL host library: {host_lib}")
-    return include_dir, lib_dir
+    candidates: list[tuple[Path, Path]] = []
+    for env_name in ("NCCL_HOME", "NCCL_ROOT"):
+        if root := os.environ.get(env_name):
+            candidates.append((Path(root) / "include", Path(root) / "lib"))
+            candidates.append((Path(root) / "include", Path(root) / "lib64"))
+    for package in ("nvidia-nccl-cu13", "nvidia-nccl-cu12"):
+        try:
+            pkg_root = Path(distribution(package).locate_file(""))
+        except PackageNotFoundError:
+            continue
+        nccl_root = pkg_root / "nvidia" / "nccl"
+        candidates.append((nccl_root / "include", nccl_root / "lib"))
+    cuda_root = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
+    candidates.extend(
+        [
+            (cuda_root / "include", cuda_root / "lib64"),
+            (Path("/usr/include"), Path("/usr/lib/x86_64-linux-gnu")),
+            (Path("/usr/local/include"), Path("/usr/local/lib")),
+        ]
+    )
+    checked: list[str] = []
+    for include_dir, lib_dir in candidates:
+        header = include_dir / "nccl.h"
+        host_lib = lib_dir / "libnccl.so.2"
+        checked.append(f"{header};{host_lib}")
+        if header.is_file() and host_lib.is_file():
+            return include_dir.resolve(), lib_dir.resolve()
+    raise RuntimeError(
+        "Unable to locate NCCL headers and libnccl.so.2; checked: "
+        + ", ".join(checked)
+    )
 
 
 def _latest_source_mtime(root: Path) -> float:
@@ -55,10 +77,29 @@ def _latest_source_mtime(root: Path) -> float:
     return max(path.stat().st_mtime for path in files)
 
 
-def _build_signature(root: Path) -> str:
+def _nccl_signature(include_dir: Path, lib_dir: Path) -> str:
+    header = include_dir / "nccl.h"
+    header_text = header.read_text(encoding="utf-8", errors="replace")
+    version_parts: list[str] = []
+    for macro in ("NCCL_MAJOR", "NCCL_MINOR", "NCCL_PATCH"):
+        match = re.search(
+            rf"^\s*#\s*define\s+{macro}\s+(\d+)\s*$",
+            header_text,
+            re.MULTILINE,
+        )
+        version_parts.append(match.group(1) if match else "unknown")
+    library = (lib_dir / "libnccl.so.2").resolve()
+    library_stat = library.stat()
+    return (
+        f"version={'.'.join(version_parts)};header={header.resolve()};library={library};"
+        f"library_size={library_stat.st_size};library_mtime_ns={library_stat.st_mtime_ns}"
+    )
+
+
+def _build_signature(root: Path, nccl_include_dir: Path, nccl_lib_dir: Path) -> str:
     return "\n".join(
         [
-            f"nccl={distribution('nvidia-nccl-cu13').version}",
+            f"nccl={_nccl_signature(nccl_include_dir, nccl_lib_dir)}",
             f"source_mtime={_latest_source_mtime(root)}",
         ]
     )
@@ -170,10 +211,11 @@ def _build_extension_path(
     root = _source_root()
     if not root.exists():
         raise RuntimeError(f"DeepEP vendor source tree is missing: {root}")
+    nccl_include_dir, nccl_lib_dir = _resolve_nccl_layout()
     build_dir = _build_dir()
     build_dir.mkdir(parents=True, exist_ok=True)
     signature_path = build_dir / "build.signature"
-    signature = _build_signature(root)
+    signature = _build_signature(root, nccl_include_dir, nccl_lib_dir)
     existing = _built_so_path(build_dir)
     if (
         not force_rebuild
@@ -203,7 +245,6 @@ def _build_extension_path(
             _log(f"locked_fast_path so_path={existing}")
             return existing
 
-        nccl_include_dir, nccl_lib_dir = _resolve_nccl_layout()
         _write_setup_py(
             setup_path,
             root,

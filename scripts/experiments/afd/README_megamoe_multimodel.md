@@ -17,7 +17,13 @@ cd FastAFD
 git status --short
 git rev-parse HEAD
 export CONTAINER_IMAGE=/path/to/sglang_blackwell.sqsh
+export HOST_ROOT=$(dirname "$(realpath .)")
+python3 -m pip install --target "${HOST_ROOT}/python_deps" 'msgpack==1.2.1'
 ```
+
+The runners prepend `/workspace/python_deps` to `PYTHONPATH`; the submit script
+maps `HOST_ROOT` to `/workspace`. This explicit dependency directory is needed
+when the selected SGLang container does not already provide `msgpack`.
 
 The model registry provides split-stage contracts for:
 
