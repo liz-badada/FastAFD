@@ -554,7 +554,7 @@ def main() -> None:
         "--weight-slots",
         type=int,
         default=2,
-        help="Number of deterministic weight sets to allocate and cycle across layers",
+        help="Number of deterministic weight sets to allocate and cycle across layers; 0 means all layers",
     )
     parser.add_argument("--warmups", type=int, default=30)
     parser.add_argument("--iterations", type=int, default=30)
@@ -573,8 +573,8 @@ def main() -> None:
         raise SystemExit("mtp-nextn must be non-negative")
     if not 0 < args.hot_expert_fraction <= 1:
         raise SystemExit("hot-expert-fraction must be in (0, 1]")
-    if args.weight_slots < 1:
-        raise SystemExit("weight-slots must be positive")
+    if args.weight_slots < 0:
+        raise SystemExit("weight-slots must be non-negative")
     if args.warmups < 1 or args.iterations < 3:
         raise SystemExit("warmups must be >=1 and iterations must be >=3")
 
@@ -660,7 +660,7 @@ def main() -> None:
 
     torch.cuda.reset_peak_memory_stats()
     init_start = time.perf_counter()
-    weight_slots = min(layers, args.weight_slots)
+    weight_slots = layers if args.weight_slots == 0 else min(layers, args.weight_slots)
     weights: list[LayerWeights] = []
     for layer_id in range(weight_slots):
         weights.append(
