@@ -104,6 +104,7 @@ def parse_results(path: Path) -> list[ResultRow]:
             return []
         mega = backends["mega"]
         reference = backends.get("deepep")
+        overall_eligible = bool(payload.get("eligible_for_profile", False))
         reference_metadata = payload.get("deepep_backend") or {}
         ep_size = int(topology["ep_size"])
         shared = {
@@ -129,7 +130,6 @@ def parse_results(path: Path) -> list[ResultRow]:
                 payload.get("speedup_lower_bound_deepep_over_megamoe")
             ),
             "correctness": payload.get("correctness_passed"),
-            "eligible": bool(payload.get("eligible_for_profile", False)),
             "source_commit": str(source.get("commit", "")),
             "source_tree_sha256": str(source.get("source_tree_sha256", "")),
             **environment,
@@ -141,6 +141,7 @@ def parse_results(path: Path) -> list[ResultRow]:
                 latency_p50_ms=float(mega["stage_cuda"]["p50_ms"]),
                 cv_percent=float(mega["stage_cuda"]["cv_percent"]),
                 stable=bool(mega["stable"]),
+                eligible=overall_eligible and bool(mega["stable"]),
                 **shared,
             )
         ]
@@ -155,6 +156,7 @@ def parse_results(path: Path) -> list[ResultRow]:
                     latency_p50_ms=float(reference["stage_cuda"]["p50_ms"]),
                     cv_percent=float(reference["stage_cuda"]["cv_percent"]),
                     stable=bool(reference["stable"]),
+                    eligible=overall_eligible and bool(reference["stable"]),
                     **shared,
                 )
             )
