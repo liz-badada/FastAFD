@@ -194,13 +194,16 @@ name.
    duplicate eligible exact keys and reports both source paths instead of
    emitting an AIC profile whose result depends on directory order.
 
-4. Consume the profile with the matching AIC branch only when the profile
-   system matches the target sweep. `--require-measured-moe` prevents a
-   generic MoE estimate from being mixed into either comparison arm. The
-   committed reference is `b200_sxm`; AIC's current fixed-pool tool targets
-   `gb200`, so it rejects that reference by design. Re-run the same measurement
-   matrix on GB200 and export a profile whose entries use `system=gb200` before
-   running this exact-measured command.
+4. Consume the profile with the matching AIC branch only when both the system
+   and topology match the target sweep. `--require-measured-moe` prevents a
+   generic MoE estimate from being mixed into either comparison arm. AIC reads
+   the node width from `--system`. The committed `b200_sxm` profile contains
+   exact colocated `ep8` entries, but its single-node split measurements use
+   `4A4F` or `2A6F`; those are not node-aligned AFD service units for the
+   8-GPU-per-node `b200_sxm` AIC system. They are therefore backend evidence,
+   not an exact B200 AFD injection. A paired B200 run needs node-aligned split
+   measurements such as `8A8F`. A GB200 run needs a separately qualified
+   `system=gb200` profile; it must not relabel the B200 measurements.
 
    ```bash
    git clone --branch pr1323-afd-moe-eval \
@@ -210,10 +213,11 @@ name.
    git lfs pull
    uv run python tools/afd_multimodel_mtp_experiment.py \
      --output /path/to/measured_sweep.json \
+     --system gb200 \
      --models qwen3_235b minimax_m25 minimax_m3 deepseek_v4_flash deepseek_v4_pro \
      --workloads 8k 16k --total-gpus 16 24 36 48 72 \
      --profile-scope primary \
-     --afd-moe-profile /path/to/afd_moe_stage_profile.json \
+     --afd-moe-profile /path/to/qualified_gb200_profile.json \
      --require-measured-moe
    ```
 
