@@ -25,6 +25,17 @@ export XDG_CACHE_HOME="${workspace}/cache"
 export MINISGL_DEEPGEMM_BUILD_DIR="${workspace}/cache/deepgemm-multimodel"
 export PYTHONPATH="${workspace}/python_deps:${fastafd_root}/python"
 export MEASUREMENT_CONTAINER_IMAGE=${MEASUREMENT_CONTAINER_IMAGE:-unknown}
+if [[ ${backend} == deepep ]]; then
+  nccl_root=${NCCL_ROOT:-${workspace}/python_deps/nvidia/nccl}
+  for required in include/nccl.h include/nccl_device.h include/nccl_device/core.h lib/libnccl.so.2; do
+    if [[ ! -e ${nccl_root}/${required} ]]; then
+      echo "split DeepEP requires NCCL >=2.30.4 under ${nccl_root}; missing ${required}" >&2
+      exit 2
+    fi
+  done
+  export NCCL_ROOT=${nccl_root}
+  export LD_LIBRARY_PATH="${nccl_root}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 
 suffix="${model}_${backend}_${ag_size}a${eg_size}f_s${sequences_per_ag_rank}_n${mtp_nextn}_mb${microbatches}_${routing}"
 args=(

@@ -35,6 +35,21 @@ def _source_files(root: Path) -> list[Path]:
     ]
 
 
+def _nccl_header_version(header: Path) -> tuple[int, int, int] | None:
+    header_text = header.read_text(encoding="utf-8", errors="replace")
+    parts: list[int] = []
+    for macro in ("NCCL_MAJOR", "NCCL_MINOR", "NCCL_PATCH"):
+        match = re.search(
+            rf"^\s*#\s*define\s+{macro}\s+(\d+)\s*$",
+            header_text,
+            re.MULTILINE,
+        )
+        if match is None:
+            return None
+        parts.append(int(match.group(1)))
+    return parts[0], parts[1], parts[2]
+
+
 def _resolve_nccl_layout() -> tuple[Path, Path]:
     candidates: list[tuple[Path, Path]] = []
     for env_name in ("NCCL_HOME", "NCCL_ROOT"):
@@ -59,12 +74,21 @@ def _resolve_nccl_layout() -> tuple[Path, Path]:
     checked: list[str] = []
     for include_dir, lib_dir in candidates:
         header = include_dir / "nccl.h"
+        device_header = include_dir / "nccl_device.h"
+        device_core_header = include_dir / "nccl_device" / "core.h"
         host_lib = lib_dir / "libnccl.so.2"
-        checked.append(f"{header};{host_lib}")
-        if header.is_file() and host_lib.is_file():
+        version = _nccl_header_version(header) if header.is_file() else None
+        checked.append(f"{include_dir} version={version};{host_lib}")
+        if (
+            version is not None
+            and version >= (2, 30, 4)
+            and device_header.is_file()
+            and device_core_header.is_file()
+            and host_lib.is_file()
+        ):
             return include_dir.resolve(), lib_dir.resolve()
     raise RuntimeError(
-        "Unable to locate NCCL headers and libnccl.so.2; checked: "
+        "Unable to locate NCCL >=2.30.4 Device API headers and libnccl.so.2; checked: "
         + ", ".join(checked)
     )
 
@@ -79,19 +103,13 @@ def _latest_source_mtime(root: Path) -> float:
 
 def _nccl_signature(include_dir: Path, lib_dir: Path) -> str:
     header = include_dir / "nccl.h"
-    header_text = header.read_text(encoding="utf-8", errors="replace")
-    version_parts: list[str] = []
-    for macro in ("NCCL_MAJOR", "NCCL_MINOR", "NCCL_PATCH"):
-        match = re.search(
-            rf"^\s*#\s*define\s+{macro}\s+(\d+)\s*$",
-            header_text,
-            re.MULTILINE,
-        )
-        version_parts.append(match.group(1) if match else "unknown")
+    version = _nccl_header_version(header)
+    if version is None:
+        raise RuntimeError(f"Unable to parse NCCL version from {header}")
     library = (lib_dir / "libnccl.so.2").resolve()
     library_stat = library.stat()
     return (
-        f"version={'.'.join(version_parts)};header={header.resolve()};library={library};"
+        f"version={'.'.join(map(str, version))};header={header.resolve()};library={library};"
         f"library_size={library_stat.st_size};library_mtime_ns={library_stat.st_mtime_ns}"
     )
 
