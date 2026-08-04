@@ -982,6 +982,7 @@ def main() -> None:
             }
             backend_implementation = "FastAFD MegaMoE M2N persistent split kernel"
         else:
+            nccl_version = torch.cuda.nccl.version()
             measurement_boundary = (
                 "split AFD MoE stage: A-side block-128 FP8 quant, DeepEP union dispatch, "
                 "zero-source combine and routed-output scaling; F-side psum-layout "
@@ -995,6 +996,12 @@ def main() -> None:
                 "input_quantization": "E4M3 with packed UE8M0 block-128 scales",
                 "weight_quantization": "E2M1 with UE8M0 block-32 scales",
                 "weight_slots": deepep_weight_slots,
+                "nccl_runtime_version": (
+                    ".".join(map(str, nccl_version))
+                    if isinstance(nccl_version, tuple)
+                    else str(nccl_version)
+                ),
+                "gin_disabled": os.environ.get("EP_DISABLE_GIN", "0") == "1",
                 "per_buffer_comm_stream": os.environ.get(
                     "MINISGL_DEEPEP_PER_BUFFER_COMM_STREAM",
                     "0",
