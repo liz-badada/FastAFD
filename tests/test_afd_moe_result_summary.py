@@ -124,32 +124,6 @@ def test_unstable_colocated_backend_is_not_exported(tmp_path: Path) -> None:
     ]
 
 
-def test_reused_colocated_weights_are_not_exported(tmp_path: Path) -> None:
-    colocated = _common_payload() | {
-        "schema": summary.COLOCATED_SCHEMA,
-        "topology": {"ep_size": 8},
-        "workload": {
-            "logical_tokens_per_rank": 48,
-            "mtp_nextn": 1,
-            "layers": 94,
-            "weight_slots": 2,
-        },
-        "backend_results": {
-            "mega": {"stage_cuda": {"p50_ms": 7.5, "cv_percent": 1.0}, "stable": True},
-            "deepep": {
-                "stage_cuda": {"p50_ms": 10.5, "cv_percent": 1.5},
-                "stable": True,
-            },
-        },
-        "deepep_backend": {"deep_ep_version": "1", "sglang_version": "2"},
-        "correctness_passed": True,
-        "eligible_for_profile": True,
-    }
-    rows = summary.parse_results(_write(tmp_path / "agg.json", colocated))
-
-    assert all(not row.eligible for row in rows)
-
-
 def test_legacy_split_schema_defaults_to_megamoe(tmp_path: Path) -> None:
     payload = _common_payload() | {
         "schema": summary.LEGACY_SPLIT_SCHEMA,

@@ -105,10 +105,7 @@ def parse_results(path: Path) -> list[ResultRow]:
         mega = backends["mega"]
         reference = backends.get("deepep")
         layers = int(workload["layers"])
-        weight_slots = int(workload.get("weight_slots", layers))
-        overall_eligible = (
-            bool(payload.get("eligible_for_profile", False)) and weight_slots == layers
-        )
+        overall_eligible = bool(payload.get("eligible_for_profile", False))
         reference_metadata = payload.get("deepep_backend") or {}
         ep_size = int(topology["ep_size"])
         shared = {

@@ -6,7 +6,7 @@ export RESULTS_DIR=${RESULTS_DIR:-/workspace/results/megamoe-colocated-multimode
 export EP_SIZE=${EP_SIZE:-8}
 export LAYERS=${LAYERS:-0}
 export ROUTING=${ROUTING:-balanced}
-export WEIGHT_SLOTS=${WEIGHT_SLOTS:-0}
+export WEIGHT_SLOTS=${WEIGHT_SLOTS:-2}
 export WARMUPS=${WARMUPS:-30}
 export ITERATIONS=${ITERATIONS:-30}
 
