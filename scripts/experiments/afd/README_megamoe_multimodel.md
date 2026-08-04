@@ -159,7 +159,7 @@ name.
    projection.
 
    Measure the matching high-load colocated envelope used by AGG with the
-   checked-in 20-case matrix:
+   checked-in 37-case matrix:
 
    ```bash
    SOURCE_ROOT=/path/to/FastAFD \
