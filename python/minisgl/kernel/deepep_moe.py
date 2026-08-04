@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import functools
 import importlib.util
 import os
@@ -17,8 +18,8 @@ from typing import Any, Callable
 import torch
 import torch.distributed as dist
 
-from .build_utils import nvcc_build_env as _build_nvcc_env, resolve_nvcc as _resolve_nvcc
-
+from .build_utils import nvcc_build_env as _build_nvcc_env
+from .build_utils import resolve_nvcc as _resolve_nvcc
 
 _EXT_NAME = "_minisgl_deepep_moe"
 
@@ -91,6 +92,50 @@ def _resolve_nccl_layout() -> tuple[Path, Path]:
         "Unable to locate NCCL >=2.30.4 Device API headers and libnccl.so.2; checked: "
         + ", ".join(checked)
     )
+
+
+def _decode_nccl_version(version_code: int) -> tuple[int, int, int]:
+    return version_code // 10000, (version_code % 10000) // 100, version_code % 100
+
+
+def nccl_runtime_metadata() -> dict[str, Any]:
+    """Report the NCCL selected for DeepEP and loaded by the current process."""
+
+    include_dir, lib_dir = _resolve_nccl_layout()
+    header_version = _nccl_header_version(include_dir / "nccl.h")
+    if header_version is None:
+        raise RuntimeError(f"Unable to parse NCCL version from {include_dir / 'nccl.h'}")
+
+    selected_library = (lib_dir / "libnccl.so.2").resolve()
+    nccl = ctypes.CDLL(str(selected_library), mode=getattr(os, "RTLD_GLOBAL", 0))
+    runtime_code = ctypes.c_int()
+    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    nccl.ncclGetVersion.restype = ctypes.c_int
+    status = int(nccl.ncclGetVersion(ctypes.byref(runtime_code)))
+    if status != 0:
+        raise RuntimeError(f"ncclGetVersion failed with status {status}")
+    runtime_version = _decode_nccl_version(runtime_code.value)
+    if runtime_version < (2, 30, 4):
+        raise RuntimeError(
+            "DeepEP requires NCCL >=2.30.4 at runtime, got "
+            + ".".join(map(str, runtime_version))
+        )
+
+    loaded_libraries: list[str] = []
+    maps_path = Path("/proc/self/maps")
+    if maps_path.is_file():
+        for line in maps_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.split()
+            if fields and "libnccl.so" in fields[-1]:
+                loaded_libraries.append(str(Path(fields[-1]).resolve()))
+
+    return {
+        "header_version": ".".join(map(str, header_version)),
+        "runtime_version": ".".join(map(str, runtime_version)),
+        "runtime_version_code": runtime_code.value,
+        "selected_library": str(selected_library),
+        "loaded_libraries": sorted(set(loaded_libraries)),
+    }
 
 
 def _latest_source_mtime(root: Path) -> float:

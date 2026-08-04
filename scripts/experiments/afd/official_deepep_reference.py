@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from minisgl.kernel.deepep_moe import nccl_runtime_metadata
 
 
 def _distribution_version(*names: str) -> str:
@@ -110,11 +111,18 @@ class OfficialDeepEPReference:
         self._destroyed = False
 
     def metadata(self) -> dict[str, Any]:
+        torch_nccl_version = torch.cuda.nccl.version()
         return {
             "implementation": "official deep_ep.Buffer normal mode",
             "deep_ep_version": _distribution_version("deep-ep", "deep_ep"),
             "deep_ep_module": str(self._deep_ep.__file__),
             "sglang_version": _distribution_version("sglang"),
+            "torch_nccl_build_version": (
+                ".".join(map(str, torch_nccl_version))
+                if isinstance(torch_nccl_version, tuple)
+                else str(torch_nccl_version)
+            ),
+            "deepep_nccl": nccl_runtime_metadata(),
             "world_size": self.world_size,
             "num_sms": int(self._deep_ep.Buffer.num_sms),
             "dispatch_config": repr(self.dispatch_config),
