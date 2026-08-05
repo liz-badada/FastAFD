@@ -2,11 +2,11 @@
 
 This file contains backend-stage measurements only; it contains no end-to-end simulation output. The JSON profile beside it is the machine-readable source of truth.
 
-Physical load is `logical_batch × (nextN + 1) / microbatches` for AGG and additionally `× A/F` for AFD. All entries are exact B200 measurements; cross-system use must be explicitly labeled as a projection.
+Logical token load is `logical_batch × (nextN + 1) / microbatches` for AGG and additionally `× A/F` for AFD. The lookup and interpolation identity is routed expert assignments, equal to that logical load times the entry's `routed_topk`; points with different top-k are never mixed. All entries are exact B200 measurements; cross-system use must be explicitly labeled as a projection.
 
 ## Coverage
 
-| model | stage | backend | points | topology | logical batch | nextN | microbatches | latency p50 ms | physical tokens/F-rank/microbatch |
+| model | stage | backend | points | topology | logical batch | nextN | microbatches | latency p50 ms | logical tokens/F-rank/microbatch |
 | --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- |
 | deepseek_v4_flash_fp4 | afd | deepep_deepgemm | 24 | 4A4F | 48, 96 | 0, 1, 2, 3 | 1, 2, 4 | 12.3870-40.0844 | 12.0-384.0 |
 | deepseek_v4_flash_fp4 | afd | megamoe | 24 | 4A4F | 48, 96 | 0, 1, 2, 3 | 1, 2, 4 | 8.4790-34.9837 | 12.0-384.0 |
@@ -31,7 +31,7 @@ Physical load is `logical_batch × (nextN + 1) / microbatches` for AGG and addit
 
 ## Exact lookup table
 
-| model | stage | backend | system | topology | logical batch | physical load/F-rank/microbatch | nextN | microbatches | layers | precision | latency p50 ms | stable | correctness | qualification | source commit | source result |
+| model | stage | backend | system | topology | logical batch | logical tokens/F-rank/microbatch | nextN | microbatches | layers | precision | latency p50 ms | stable | correctness | qualification | source commit | source result |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | --- | --- |
 | deepseek_v4_flash_fp4 | afd | deepep_deepgemm | b200_sxm | 4A4F | 48 | 48.0000 | 0 | 1 | 43 | w4a8_mxfp4_mxfp8 | 12.3870 | yes | - | same-backend-model-system-precision-colocated-plus-stable-split | e6831570e51d0fac8820d3ab3d2c36d341eb551e | scripts/experiments/afd/reference/b200_sxm/raw/split_deepep/deepseek_v4_flash_fp4_deepep_4a4f_s48_n0_mb1_balanced.json |
 | deepseek_v4_flash_fp4 | afd | deepep_deepgemm | b200_sxm | 4A4F | 48 | 24.0000 | 0 | 2 | 43 | w4a8_mxfp4_mxfp8 | 20.1342 | yes | - | same-backend-model-system-precision-colocated-plus-stable-split | e6831570e51d0fac8820d3ab3d2c36d341eb551e | scripts/experiments/afd/reference/b200_sxm/raw/split_deepep/deepseek_v4_flash_fp4_deepep_4a4f_s48_n0_mb2_balanced.json |

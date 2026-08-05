@@ -93,6 +93,70 @@ def test_split_backend_is_not_relabelled(tmp_path: Path) -> None:
     }
 
 
+def test_split_speedup_requires_the_same_routed_assignment_point(tmp_path: Path) -> None:
+    def split_payload(backend: str, latency_ms: float, *, top_k: int = 8) -> dict:
+        payload = _common_payload()
+        payload["model_profile"] = dict(payload["model_profile"], routed_top_k=top_k)
+        return payload | {
+            "schema": summary.SPLIT_SCHEMA,
+            "moe_backend": backend,
+            "backend_implementation": backend,
+            "topology": {"ag_size": 4, "eg_size": 4},
+            "workload": {
+                "sequences_per_ag_rank": 48,
+                "mtp_nextn": 1,
+                "microbatches": 2,
+                "layers": 94,
+            },
+            "stage_cuda": {"p50_ms": latency_ms, "cv_percent": 1.0},
+            "stable": True,
+            "eligible_for_profile": True,
+        }
+
+    rows = [
+        *summary.parse_results(
+            _write(tmp_path / "mega.json", split_payload(summary.MEGAMOE_BACKEND, 5.0))
+        ),
+        *summary.parse_results(
+            _write(tmp_path / "deep.json", split_payload(summary.DEEPEP_BACKEND, 8.0))
+        ),
+        # A different top-k is a different routed-assignment load and must not
+        # be used as the reference for the top-8 MegaMoE point.
+        *summary.parse_results(
+            _write(tmp_path / "deep_top4.json", split_payload(summary.DEEPEP_BACKEND, 2.0, top_k=4))
+        ),
+    ]
+    rows = summary.attach_same_point_split_speedups(rows)
+    mega = next(row for row in rows if row.moe_backend == summary.MEGAMOE_BACKEND)
+
+    assert mega.speedup_deepep_over_megamoe == 1.6
+    assert mega.routed_top_k == 8
+
+
+def test_split_load_reports_routed_assignments(tmp_path: Path) -> None:
+    payload = _common_payload() | {
+        "schema": summary.SPLIT_SCHEMA,
+        "moe_backend": summary.MEGAMOE_BACKEND,
+        "backend_implementation": "MegaMoE M2N",
+        "topology": {"ag_size": 4, "eg_size": 2},
+        "workload": {
+            "sequences_per_ag_rank": 48,
+            "mtp_nextn": 1,
+            "microbatches": 2,
+            "layers": 94,
+        },
+        "stage_cuda": {"p50_ms": 5.0, "cv_percent": 1.0},
+        "stable": True,
+        "eligible_for_profile": True,
+    }
+    row = summary.parse_results(_write(tmp_path / "split.json", payload))[0]
+
+    logical_tokens, routed_assignments = summary.result_row_loads(row)
+
+    assert logical_tokens == 96
+    assert routed_assignments == 768
+
+
 def test_unstable_colocated_backend_is_not_exported(tmp_path: Path) -> None:
     colocated = _common_payload() | {
         "schema": summary.COLOCATED_SCHEMA,

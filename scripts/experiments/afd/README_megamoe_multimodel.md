@@ -444,7 +444,7 @@ pass:
    not eligible for profile export.
 
 The JSON contains every latency sample, per-rank provenance, the source commit
-and tree hash, model contract, physical token count, routing load, correctness,
+and tree hash, model contract, logical token count, routed-assignment load, correctness,
 stability, and the final `eligible_for_profile` decision.
 
 ## AIC timing boundary

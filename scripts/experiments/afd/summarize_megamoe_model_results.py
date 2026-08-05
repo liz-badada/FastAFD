@@ -18,7 +18,7 @@ LEGACY_SPLIT_SCHEMA = "fastafd.megamoe-m2n-model-benchmark.v1"
 SPLIT_SCHEMA = "fastafd.moe-m2n-model-benchmark.v2"
 MEGAMOE_BACKEND = "megamoe"
 DEEPEP_BACKEND = "deepep_deepgemm"
-PROFILE_SCHEMA = "aic.afd-moe-stage-profile.v2"
+PROFILE_SCHEMA = "aic.afd-moe-stage-profile.v3"
 
 
 @dataclass(frozen=True)
@@ -227,6 +227,7 @@ def profile_entry_key(entry: dict[str, Any]) -> tuple[Any, ...]:
         entry["mtp_nextn"],
         entry["microbatches"],
         entry["moe_layers"],
+        entry["routed_topk"],
         entry["moe_precision"],
     )
 
@@ -240,6 +241,7 @@ def profile_validation_key(entry: dict[str, Any]) -> tuple[Any, ...]:
         entry["logical_batch_per_source_rank"],
         entry["mtp_nextn"],
         entry["moe_layers"],
+        entry["routed_topk"],
     )
 
 
@@ -277,6 +279,7 @@ def paired_split_eligibility(
             row.logical_batch,
             row.mtp_nextn,
             row.layers,
+            row.routed_top_k,
         )
 
     validated: dict[tuple[Any, ...], ResultRow] = {}
@@ -333,6 +336,48 @@ def paired_split_eligibility(
     return paired
 
 
+def attach_same_point_split_speedups(rows: list[ResultRow]) -> list[ResultRow]:
+    """Attach AFD backend ratios only when the complete split point matches."""
+
+    def comparison_key(row: ResultRow) -> tuple[Any, ...]:
+        return (
+            row.model,
+            row.precision,
+            row.system,
+            row.topology,
+            row.logical_batch,
+            row.mtp_nextn,
+            row.microbatches,
+            row.layers,
+            row.routed_top_k,
+        )
+
+    deep_by_key = {
+        comparison_key(row): row
+        for row in rows
+        if row.stage == "afd" and row.moe_backend == DEEPEP_BACKEND and row.eligible
+    }
+    result = []
+    for row in rows:
+        if row.stage != "afd" or row.moe_backend != MEGAMOE_BACKEND:
+            result.append(row)
+            continue
+        reference = deep_by_key.get(comparison_key(row))
+        speedup = None if reference is None else reference.latency_p50_ms / row.latency_p50_ms
+        result.append(
+            ResultRow(
+                **(
+                    row.__dict__
+                    | {
+                        "speedup_deepep_over_megamoe": speedup,
+                        "speedup_lower_bound_deepep_over_megamoe": None,
+                    }
+                )
+            )
+        )
+    return result
+
+
 def validate_unique_profile_keys(rows: list[ResultRow]) -> None:
     seen: dict[tuple[Any, ...], str] = {}
     for row in rows:
@@ -348,6 +393,7 @@ def validate_unique_profile_keys(rows: list[ResultRow]) -> None:
             row.mtp_nextn,
             row.microbatches,
             row.layers,
+            row.routed_top_k,
             row.precision,
         )
         if previous := seen.get(key):
@@ -385,6 +431,17 @@ def format_range(values: Iterable[float]) -> str:
     return f"{ordered[0]:.4f}-{ordered[-1]:.4f}"
 
 
+def result_row_loads(row: ResultRow) -> tuple[float, float]:
+    """Return logical tokens and routed assignments per F rank/microbatch."""
+
+    topology_factor = 1.0
+    if row.stage == "afd":
+        a_ranks, f_ranks = row.topology.removesuffix("F").split("A", 1)
+        topology_factor = int(a_ranks) / int(f_ranks)
+    logical_tokens = row.logical_batch * (row.mtp_nextn + 1) * topology_factor / row.microbatches
+    return logical_tokens, logical_tokens * row.routed_top_k
+
+
 def write_markdown(path: Path, rows: list[ResultRow]) -> None:
     columns = (
         "model",
@@ -394,7 +451,9 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         "system",
         "topology",
         "logical_batch",
-        "physical_batch",
+        "logical_tokens_per_f_rank_per_microbatch",
+        "routed_top_k",
+        "routed_assignments_per_f_rank_per_microbatch",
         "mtp_nextn",
         "microbatches",
         "layers",
@@ -531,11 +590,11 @@ def write_markdown(path: Path, rows: list[ResultRow]) -> None:
         ]
     )
     for row in rows:
+        logical_tokens, routed_assignments = result_row_loads(row)
         values = {
-            key: row.logical_batch * (row.mtp_nextn + 1)
-            if key == "physical_batch"
-            else getattr(row, key)
-            for key in columns
+            "logical_tokens_per_f_rank_per_microbatch": logical_tokens,
+            "routed_assignments_per_f_rank_per_microbatch": routed_assignments,
+            **{key: getattr(row, key) for key in columns if hasattr(row, key)},
         }
         lines.append("| " + " | ".join(format_value(values[key]) for key in columns) + " |")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -570,6 +629,7 @@ def write_profile(
             "mtp_nextn": row.mtp_nextn,
             "microbatches": row.microbatches,
             "moe_layers": row.layers,
+            "routed_topk": row.routed_top_k,
             "moe_precision": row.precision,
             "moe_backend": moe_backend,
             "latency_ms": latency_ms,
@@ -610,7 +670,11 @@ def write_profile(
             evidence=(
                 "same-point-colocated"
                 if row.stage == "agg"
-                else "same-backend-model-system-precision-colocated-plus-stable-split"
+                else (
+                    "same-point-split-plus-colocated-correctness"
+                    if row.speedup_deepep_over_megamoe is not None
+                    else "same-backend-model-system-precision-colocated-plus-stable-split"
+                )
             ),
         )
     payload = {
@@ -650,6 +714,7 @@ def main() -> int:
     base_entries = [entry for entry in base_entries if entry["stage"] not in replaced_stages]
     rows = [row for path in result_files(args.inputs) for row in parse_results(path)]
     rows = paired_split_eligibility(rows, base_entries=base_entries)
+    rows = attach_same_point_split_speedups(rows)
     validate_unique_profile_keys(rows)
     if args.csv is not None:
         write_csv(args.csv, rows)
