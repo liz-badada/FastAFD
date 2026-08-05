@@ -447,6 +447,20 @@ The JSON contains every latency sample, per-rank provenance, the source commit
 and tree hash, model contract, logical token count, routed-assignment load, correctness,
 stability, and the final `eligible_for_profile` decision.
 
+For long-context AIC sweeps, extend the measured low-load envelope without
+changing the benchmark contract:
+
+```bash
+TOKENS_PER_RANK_GRID="1 2 4 8 12 16 20 24 32 40" BACKEND=both \
+  bash scripts/experiments/afd/run_megamoe_colocated_model_suite.sh
+SEQUENCES_PER_AG_RANK_GRID="1 2 4 8 12 16 20 24 32 40" BACKEND_GRID="mega deepep" \
+  bash scripts/experiments/afd/run_megamoe_m2n_model_suite.sh
+```
+
+Invalid sequence/microbatch divisibility pairs are skipped. Profile identity
+uses routed assignments (`logical tokens × routed_top_k`), so measurements
+from different top-k contracts are never substituted for one another.
+
 ## AIC timing boundary
 
 These JSON stage measurements are not automatically interchangeable with the
