@@ -448,18 +448,33 @@ and tree hash, model contract, logical token count, routed-assignment load, corr
 stability, and the final `eligible_for_profile` decision.
 
 For long-context AIC sweeps, extend the measured low-load envelope without
-changing the benchmark contract:
+changing the benchmark contract. The checked-in matrices use logarithmic
+anchors below the retained batch-48 point for every model-specific MTP width.
+The split matrix also covers each supported microbatch count and both backends:
 
 ```bash
-TOKENS_PER_RANK_GRID="1 2 4 8 12 16 20 24 32 40" BACKEND=both \
-  bash scripts/experiments/afd/run_megamoe_colocated_model_suite.sh
-SEQUENCES_PER_AG_RANK_GRID="1 2 4 8 12 16 20 24 32 40" BACKEND_GRID="mega deepep" \
-  bash scripts/experiments/afd/run_megamoe_m2n_model_suite.sh
+SOURCE_ROOT=/path/to/FastAFD \
+RUN_SCRIPT=run_megamoe_colocated_model_case_matrix.sh \
+CASE_MATRIX=/workspace/FastAFD/scripts/experiments/afd/reference/b200_sxm/long_context_low_load_colocated_case_matrix.txt \
+RESULTS_DIR=/workspace/results/megamoe-colocated-low-load \
+WARMUPS=30 ITERATIONS=40 \
+sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
+
+SOURCE_ROOT=/path/to/FastAFD \
+RUN_SCRIPT=run_megamoe_m2n_model_case_matrix.sh \
+CASE_MATRIX=/workspace/FastAFD/scripts/experiments/afd/reference/b200_sxm/long_context_low_load_split_case_matrix.txt \
+RESULTS_DIR=/workspace/results/megamoe-split-low-load \
+WARMUPS=30 ITERATIONS=40 \
+sbatch scripts/experiments/afd/submit_megamoe_m2n_b200.sbatch
 ```
 
 Invalid sequence/microbatch divisibility pairs are skipped. Profile identity
 uses routed assignments (`logical tokens × routed_top_k`), so measurements
 from different top-k contracts are never substituted for one another.
+
+If a high-load colocated point fails only the 3% CV gate, rerun the six-point
+`high_load_colocated_retry_case_matrix.txt` before profile export. Never copy
+an unstable latency into the profile.
 
 ## AIC timing boundary
 

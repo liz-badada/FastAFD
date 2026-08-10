@@ -1,0 +1,8 @@
+# model tokens_per_rank mtp_nextn backend
+deepseek_v4_flash_fp4 192 0 both
+deepseek_v4_flash_fp4 288 0 both
+deepseek_v4_pro_fp4 384 2 both
+deepseek_v4_pro_fp4 576 2 both
+deepseek_v4_pro_fp4 720 0 both
+minimax_m25_fp4 704 1 both
+
