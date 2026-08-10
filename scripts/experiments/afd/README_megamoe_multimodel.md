@@ -172,7 +172,11 @@ name.
 
    Each row is `model tokens_per_rank mtp_nextn backend`. The matrix uses
    `backend=both`, so MegaMoE and DeepEP+DeepGEMM are measured from the same
-   process and input for a matched comparison.
+   process and input for a matched comparison. Each backend receives its own
+   contiguous warmup and measurement window (`MEASUREMENT_ORDER=grouped`) so
+   the preceding comparison backend cannot perturb its clock/cache state.
+   `MEASUREMENT_ORDER=alternating` is retained only to diagnose that order
+   effect.
 
    Set `BACKEND_GRID="deepep both"` on the colocated suite to run the
    reference-only and matched paths in the same allocation when auditing

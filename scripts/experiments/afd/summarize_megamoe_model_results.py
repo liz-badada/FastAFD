@@ -7,6 +7,7 @@ import argparse
 import copy
 import csv
 import json
+import math
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -422,15 +423,6 @@ def format_value(value: Any) -> str:
     return str(value)
 
 
-def format_range(values: Iterable[float]) -> str:
-    ordered = sorted(values)
-    if not ordered:
-        return "-"
-    if ordered[0] == ordered[-1]:
-        return f"{ordered[0]:.4f}"
-    return f"{ordered[0]:.4f}-{ordered[-1]:.4f}"
-
-
 def result_row_loads(row: ResultRow) -> tuple[float, float]:
     """Return logical tokens and routed assignments per F rank/microbatch."""
 
@@ -442,161 +434,108 @@ def result_row_loads(row: ResultRow) -> tuple[float, float]:
     return logical_tokens, logical_tokens * row.routed_top_k
 
 
-def write_markdown(path: Path, rows: list[ResultRow]) -> None:
-    columns = (
-        "model",
-        "stage",
-        "moe_backend",
-        "precision",
-        "system",
-        "topology",
-        "logical_batch",
-        "logical_tokens_per_f_rank_per_microbatch",
-        "routed_top_k",
-        "routed_assignments_per_f_rank_per_microbatch",
-        "mtp_nextn",
-        "microbatches",
-        "layers",
-        "latency_p50_ms",
-        "backend_stack",
-        "speedup_deepep_over_megamoe",
-        "speedup_lower_bound_deepep_over_megamoe",
-        "cv_percent",
-        "correctness",
-        "eligible",
-        "source_commit",
+def profile_entry_load(entry: dict[str, Any]) -> float:
+    logical_tokens = (
+        entry["logical_batch_per_source_rank"] * (entry["mtp_nextn"] + 1) / entry["microbatches"]
     )
-    lines = [
-        "# Measured AFD MoE backend latency reference",
-        "",
-        "Only exact measured points are listed. An AFD row is eligible only when it is stable and has a correctness-passing colocated MegaMoE-versus-DeepEP result at the same model, precision, system, logical source-rank batch, MTP nextN, and layer count.",
-        "",
-        "The speedup columns compare complete colocated MoE-stage backend paths, including production quantization, dispatch/combine, expert alignment, scatter/gather, and GEMMs. They are not GEMM-only or end-to-end serving speedups. The AIC profile consumes each backend's absolute latency.",
-        "",
-        "## Model contracts",
-        "",
-        "| model | hidden | expert intermediate | routed experts | routed top-k | shared experts | activation | precision |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
-    ]
-    contracts = {
-        (
-            row.model,
-            row.hidden_size,
-            row.intermediate_size,
-            row.routed_experts,
-            row.routed_top_k,
-            row.shared_experts,
-            row.activation,
-            row.precision,
-        )
-        for row in rows
-    }
-    for contract in sorted(contracts):
-        lines.append("| " + " | ".join(format_value(value) for value in contract) + " |")
+    if entry["stage"] == "afd":
+        a_ranks, f_ranks = entry["topology"].removesuffix("F").split("A", 1)
+        logical_tokens *= int(a_ranks) / int(f_ranks)
+    return logical_tokens
 
-    lines.extend(
-        [
-            "",
-            "## Backend summary",
-            "",
-            "| model | backend | precision | system | colocated points | split points | colocated p50 ms | split p50 ms | DeepEP / MegaMoE median | conservative lower bound | max CV % | backend stack |",
-            "| --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | --- |",
-        ]
-    )
-    for model in sorted({row.model for row in rows}):
-        for backend in sorted({row.moe_backend for row in rows if row.model == model}):
-            model_rows = [
-                row
-                for row in rows
-                if row.model == model and row.moe_backend == backend and row.eligible
-            ]
-            colocated = [row for row in model_rows if row.stage == "agg"]
-            split = [row for row in model_rows if row.stage == "afd"]
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        model,
-                        backend,
-                        ", ".join(sorted({row.precision for row in model_rows})),
-                        ", ".join(sorted({row.system for row in model_rows})),
-                        str(len(colocated)),
-                        str(len(split)),
-                        format_range(row.latency_p50_ms for row in colocated),
-                        format_range(row.latency_p50_ms for row in split),
-                        format_range(
-                            row.speedup_deepep_over_megamoe
-                            for row in colocated
-                            if row.speedup_deepep_over_megamoe is not None
-                        ),
-                        format_range(
-                            row.speedup_lower_bound_deepep_over_megamoe
-                            for row in colocated
-                            if row.speedup_lower_bound_deepep_over_megamoe is not None
-                        ),
-                        format_value(max((row.cv_percent for row in model_rows), default=None)),
-                        ", ".join(sorted({row.backend_stack for row in model_rows})),
-                    ]
-                )
-                + " |"
-            )
-    environments: dict[tuple[str, ...], dict[str, set[str]]] = defaultdict(
-        lambda: {"jobs": set(), "nodes": set(), "commits": set(), "trees": set()}
-    )
-    for row in rows:
-        key = (
-            row.system,
-            row.gpu_name,
-            row.driver_power_clocks_memory,
-            row.torch_version,
-            row.cuda_runtime,
-            row.container_image,
-            row.slurm_partition,
-        )
-        environments[key]["jobs"].add(row.slurm_job_id)
-        environments[key]["nodes"].add(row.slurm_node)
-        environments[key]["commits"].add(row.source_commit)
-        environments[key]["trees"].add(row.source_tree_sha256)
-    lines.extend(
-        [
-            "",
-            "## Measurement environments",
-            "",
-            "| system | GPU | driver / power / clocks / memory | Torch | CUDA | container | partition | jobs | nodes | source commits | source tree SHA-256 |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-        ]
-    )
-    for key, values in sorted(environments.items()):
+
+def _compact_values(values: Iterable[Any]) -> str:
+    return ", ".join(format_value(value) for value in sorted(set(values)))
+
+
+def _range(values: Iterable[float]) -> str:
+    ordered = sorted(values)
+    if not ordered:
+        return "-"
+    if math.isclose(ordered[0], ordered[-1]):
+        return f"{ordered[0]:.4f}"
+    return f"{ordered[0]:.4f}-{ordered[-1]:.4f}"
+
+
+def write_markdown(path: Path, entries: list[dict[str, Any]]) -> None:
+    """Render the complete merged profile, including retained base entries."""
+
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        grouped[(entry["model_profile"], entry["stage"], entry["moe_backend"])].append(entry)
+
+    lines = [
+        "# Measured AFD MoE backend latency lookup",
+        "",
+        "This file contains backend-stage measurements only; it contains no end-to-end simulation output. The JSON profile beside it is the machine-readable source of truth.",
+        "",
+        "Logical token load is `logical_batch × (nextN + 1) / microbatches` for AGG and additionally `× A/F` for AFD. The lookup and interpolation identity is routed expert assignments, equal to that logical load times the entry's `routed_topk`; points with different top-k are never mixed. All entries are exact B200 measurements; cross-system use must be explicitly labeled as a projection.",
+        "",
+        "## Coverage",
+        "",
+        "| model | stage | backend | points | topology | logical batch | nextN | microbatches | latency p50 ms | logical tokens/F-rank/microbatch |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- |",
+    ]
+    for (model, stage, backend), values in sorted(grouped.items()):
         lines.append(
             "| "
             + " | ".join(
                 [
-                    *key,
-                    ", ".join(sorted(values["jobs"])),
-                    ", ".join(sorted(values["nodes"])),
-                    ", ".join(sorted(values["commits"])),
-                    ", ".join(sorted(values["trees"])),
+                    model,
+                    stage,
+                    backend,
+                    str(len(values)),
+                    _compact_values(entry["topology"] for entry in values),
+                    _compact_values(entry["logical_batch_per_source_rank"] for entry in values),
+                    _compact_values(entry["mtp_nextn"] for entry in values),
+                    _compact_values(entry["microbatches"] for entry in values),
+                    _range(float(entry["latency_ms"]) for entry in values),
+                    _range(profile_entry_load(entry) for entry in values),
                 ]
             )
             + " |"
         )
+
     lines.extend(
         [
             "",
-            "## Exact measured points",
+            "## Exact lookup table",
             "",
-            "| " + " | ".join(columns) + " |",
-            "| " + " | ".join("---" for _ in columns) + " |",
+            "| model | stage | backend | system | topology | logical batch | logical tokens/F-rank/microbatch | routed assignments/F-rank/microbatch | nextN | microbatches | layers | precision | latency p50 ms | stable | correctness | qualification | source commit | source result |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | --- | --- |",
         ]
     )
-    for row in rows:
-        logical_tokens, routed_assignments = result_row_loads(row)
-        values = {
-            "logical_tokens_per_f_rank_per_microbatch": logical_tokens,
-            "routed_assignments_per_f_rank_per_microbatch": routed_assignments,
-            **{key: getattr(row, key) for key in columns if hasattr(row, key)},
-        }
-        lines.append("| " + " | ".join(format_value(values[key]) for key in columns) + " |")
+    for entry in sorted(entries, key=profile_entry_key):
+        logical_tokens = profile_entry_load(entry)
+        validation = entry["validation"]
+        source = entry["source"]
+        lines.append(
+            "| "
+            + " | ".join(
+                format_value(value)
+                for value in (
+                    entry["model_profile"],
+                    entry["stage"],
+                    entry["moe_backend"],
+                    entry["system"],
+                    entry["topology"],
+                    entry["logical_batch_per_source_rank"],
+                    logical_tokens,
+                    logical_tokens * entry["routed_topk"],
+                    entry["mtp_nextn"],
+                    entry["microbatches"],
+                    entry["moe_layers"],
+                    entry["moe_precision"],
+                    entry["latency_ms"],
+                    validation["stable"],
+                    validation["correctness"],
+                    validation["evidence"],
+                    source["commit"],
+                    source["result"],
+                )
+            )
+            + " |"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -606,7 +545,7 @@ def write_profile(
     rows: list[ResultRow],
     *,
     base_entries: list[dict[str, Any]] | None = None,
-) -> None:
+) -> dict[str, Any]:
     entries: list[dict[str, Any]] = copy.deepcopy(base_entries or [])
     seen = {profile_entry_key(entry) for entry in entries}
 
@@ -684,6 +623,7 @@ def write_profile(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -718,8 +658,8 @@ def main() -> int:
     validate_unique_profile_keys(rows)
     if args.csv is not None:
         write_csv(args.csv, rows)
-    write_markdown(args.markdown, rows)
-    write_profile(args.profile, rows, base_entries=base_entries)
+    profile = write_profile(args.profile, rows, base_entries=base_entries)
+    write_markdown(args.markdown, profile["entries"])
     print(json.dumps({"rows": len(rows), "eligible": sum(row.eligible for row in rows)}, indent=2))
     return 0
 

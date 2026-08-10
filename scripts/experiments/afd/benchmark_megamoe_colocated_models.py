@@ -99,6 +99,26 @@ def summarize(values: list[float]) -> dict[str, float | int]:
     }
 
 
+def measurement_plan(
+    backends: tuple[str, ...], warmups: int, iterations: int, order: str
+) -> list[tuple[str, bool]]:
+    """Return `(backend, record)` steps for reproducible backend timing."""
+
+    if order == "grouped":
+        return [
+            (backend, record)
+            for backend in backends
+            for record, repeats in ((False, warmups), (True, iterations))
+            for _ in range(repeats)
+        ]
+    plan = []
+    for record, repeats in ((False, warmups), (True, iterations)):
+        for index in range(repeats):
+            execution_order = backends if index % 2 == 0 else tuple(reversed(backends))
+            plan.extend((backend, record) for backend in execution_order)
+    return plan
+
+
 def tensor_pair_nbytes(value: tuple[torch.Tensor, torch.Tensor]) -> int:
     return sum(tensor.numel() * tensor.element_size() for tensor in value)
 
@@ -555,6 +575,15 @@ def main() -> None:
         help="Measure FastAFD MegaMoE, official DeepEP+DeepGEMM, or both",
     )
     parser.add_argument(
+        "--measurement-order",
+        choices=("grouped", "alternating"),
+        default="grouped",
+        help=(
+            "Measure each backend after its own contiguous warmup by default; "
+            "alternating is retained only for diagnosing cross-backend order effects"
+        ),
+    )
+    parser.add_argument(
         "--weight-slots",
         type=int,
         default=2,
@@ -769,49 +798,33 @@ def main() -> None:
         }
         del mega_reference, deepep_reference, difference, ulp_difference
 
-    output_by_backend: dict[str, torch.Tensor] = {}
-    for warmup in range(args.warmups):
-        order = enabled_backends if warmup % 2 == 0 else tuple(reversed(enabled_backends))
-        for name in order:
-            dist.barrier()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            output_by_backend[name] = run_backend(name)
-            end.record()
-            end.synchronize()
-            gathered = [None] * world_size if rank == 0 else None
-            dist.gather_object(
-                {"cuda_ms": float(start.elapsed_time(end))},
-                object_gather_list=gathered,
-                dst=0,
-            )
-
     gathered_iterations: dict[str, list[list[dict[str, float]]]] = {
         name: [] for name in enabled_backends
     }
-    for iteration in range(args.iterations):
-        order = enabled_backends if iteration % 2 == 0 else tuple(reversed(enabled_backends))
-        for name in order:
-            dist.barrier()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            wall_start = time.perf_counter()
-            output_by_backend[name] = run_backend(name)
-            end.record()
-            end.synchronize()
-            cuda_ms = float(start.elapsed_time(end))
-            wall_ms = (time.perf_counter() - wall_start) * 1000.0
-            gathered = [None] * world_size if rank == 0 else None
-            dist.gather_object(
-                {"cuda_ms": cuda_ms, "wall_ms": wall_ms},
-                object_gather_list=gathered,
-                dst=0,
-            )
-            if rank == 0:
-                assert gathered is not None
-                gathered_iterations[name].append(gathered)
+    output_by_backend: dict[str, torch.Tensor] = {}
+    for name, record in measurement_plan(
+        enabled_backends, args.warmups, args.iterations, args.measurement_order
+    ):
+        dist.barrier()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        wall_start = time.perf_counter()
+        output_by_backend[name] = run_backend(name)
+        end.record()
+        end.synchronize()
+        gathered = [None] * world_size if rank == 0 else None
+        dist.gather_object(
+            {
+                "cuda_ms": float(start.elapsed_time(end)),
+                "wall_ms": (time.perf_counter() - wall_start) * 1000.0,
+            },
+            object_gather_list=gathered,
+            dst=0,
+        )
+        if record and rank == 0:
+            assert gathered is not None
+            gathered_iterations[name].append(gathered)
 
     local_output_quality = {
         name: {
@@ -959,6 +972,12 @@ def main() -> None:
             },
             "warmups": args.warmups,
             "iterations": args.iterations,
+            "measurement_order": args.measurement_order,
+            "measurement_order_note": (
+                "grouped gives every backend an independent contiguous warmup and measurement "
+                "window; alternating is diagnostic because the preceding comparison backend can "
+                "change the next sample's clock and cache state"
+            ),
             "backend_results": backend_results,
             "speedup_deepep_over_megamoe": speedup,
             "speedup_lower_bound_deepep_over_megamoe": conservative_speedup,

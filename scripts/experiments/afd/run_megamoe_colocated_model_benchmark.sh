@@ -12,6 +12,7 @@ mtp_nextn=${MTP_NEXTN:-0}
 layers=${LAYERS:-0}
 routing=${ROUTING:-balanced}
 backend=${BACKEND:-mega}
+measurement_order=${MEASUREMENT_ORDER:-grouped}
 weight_slots=${WEIGHT_SLOTS:-2}
 warmups=${WARMUPS:-30}
 iterations=${ITERATIONS:-30}
@@ -38,6 +39,7 @@ torchrun --standalone --nproc-per-node="${ep_size}" \
   --layers "${layers}" \
   --routing "${routing}" \
   --backend "${backend}" \
+  --measurement-order "${measurement_order}" \
   --weight-slots "${weight_slots}" \
   --warmups "${warmups}" \
   --iterations "${iterations}"

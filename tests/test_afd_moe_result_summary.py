@@ -301,7 +301,22 @@ def test_main_can_replace_base_stage(tmp_path: Path) -> None:
         "correctness_passed": True,
         "eligible_for_profile": True,
     }
-    old_rows = summary.parse_results(_write(tmp_path / "old.json", old))
+    retained_split = _common_payload() | {
+        "schema": summary.LEGACY_SPLIT_SCHEMA,
+        "topology": {"ag_size": 4, "eg_size": 4},
+        "workload": {
+            "sequences_per_ag_rank": 48,
+            "mtp_nextn": 0,
+            "microbatches": 2,
+            "layers": 94,
+        },
+        "stage_cuda": {"p50_ms": 6.0, "cv_percent": 1.0},
+        "stable": True,
+    }
+    old_rows = [
+        *summary.parse_results(_write(tmp_path / "old.json", old)),
+        *summary.parse_results(_write(tmp_path / "retained_split.json", retained_split)),
+    ]
     base_path = tmp_path / "base.json"
     summary.write_profile(base_path, old_rows)
 
@@ -326,6 +341,12 @@ def test_main_can_replace_base_stage(tmp_path: Path) -> None:
         assert summary.main() == 0
 
     entries = json.loads(profile_path.read_text(encoding="utf-8"))["entries"]
-    assert len(entries) == 2
-    mega = next(entry for entry in entries if entry["moe_backend"] == summary.MEGAMOE_BACKEND)
+    assert len(entries) == 3
+    mega = next(
+        entry
+        for entry in entries
+        if entry["stage"] == "agg" and entry["moe_backend"] == summary.MEGAMOE_BACKEND
+    )
     assert mega["latency_ms"] == 6.5
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "| qwen3_235b_fp4 | afd | megamoe | 1 | 4A4F |" in markdown
