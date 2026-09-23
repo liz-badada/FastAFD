@@ -233,6 +233,7 @@ class AfdCoordinator:
         self._pending_metrics: dict[int, _AfdPendingMetric] = {}
         if server_args.afd_metrics_output:
             manifest = AfdMetricsManifest.load(server_args.afd_metrics_manifest)
+            manifest.validate_worker_ranks(self._layout.total_workers)
             runtime = {
                 "attention_backend": self.attention_backend,
                 "dtype": str(server_args.dtype).removeprefix("torch."),

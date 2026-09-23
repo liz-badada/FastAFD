@@ -21,7 +21,7 @@ def _manifest_payload() -> dict:
         "model_revision": "89abcdef0123456789abcdef0123456789abcdef",
         "system": "b200_sxm",
         "hardware": {
-            "gpu_model": "NVIDIA B200",
+            "gpu_models": {"0": "NVIDIA B200"},
             "gpu_to_hca": {"0": ["mlx5_0"]},
             "backend_hcas": {"0": ["mlx5_0"]},
             "gpu_clocks_mhz": {"0": 1830},
@@ -41,7 +41,8 @@ def test_manifest_loads_strict_schema(tmp_path):
     manifest = AfdMetricsManifest.load(_write_manifest(tmp_path))
 
     assert manifest.system == "b200_sxm"
-    assert manifest.hardware["gpu_model"] == "NVIDIA B200"
+    assert manifest.hardware["gpu_models"]["0"] == "NVIDIA B200"
+    manifest.validate_worker_ranks(1)
 
 
 @pytest.mark.parametrize(
@@ -91,6 +92,13 @@ def test_manifest_rejects_incomplete_hardware(tmp_path, field, value, match):
 
     with pytest.raises(ValueError, match=match):
         AfdMetricsManifest.load(_write_manifest(tmp_path, payload))
+
+
+def test_manifest_rejects_worker_rank_mismatch(tmp_path):
+    manifest = AfdMetricsManifest.load(_write_manifest(tmp_path))
+
+    with pytest.raises(ValueError, match=r"missing=\[1\]"):
+        manifest.validate_worker_ranks(2)
 
 
 def test_writer_emits_run_and_decode_records(tmp_path):

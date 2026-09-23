@@ -48,7 +48,7 @@ The manifest uses `fastafd.afd-run-manifest.v1`:
   "model_revision": "89abcdef0123456789abcdef0123456789abcdef",
   "system": "b200_sxm",
   "hardware": {
-    "gpu_model": "NVIDIA B200",
+    "gpu_models": {"0": "NVIDIA B200"},
     "gpu_to_hca": {"0": ["mlx5_0"]},
     "backend_hcas": {"0": ["mlx5_0"]},
     "gpu_clocks_mhz": {"0": 1830},
@@ -57,6 +57,9 @@ The manifest uses `fastafd.afd-run-manifest.v1`:
   }
 }
 ```
+
+Hardware map keys are FastAFD AG/EG union-world ranks and must cover every
+worker rank.
 
 The output uses `fastafd.afd-step-metrics.v1`. Each decode record measures the
 coordinator interval from the first worker command until all AG and EG replies

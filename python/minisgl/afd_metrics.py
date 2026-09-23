@@ -21,7 +21,7 @@ _MANIFEST_FIELDS = {
     "hardware",
 }
 _HARDWARE_FIELDS = {
-    "gpu_model",
+    "gpu_models",
     "gpu_to_hca",
     "backend_hcas",
     "gpu_clocks_mhz",
@@ -84,14 +84,21 @@ def _validate_positive_rank_map(value: Any, field: str) -> set[str]:
     return set(rank_map)
 
 
+def _validate_text_rank_map(value: Any, field: str) -> set[str]:
+    rank_map = _require_rank_map(value, field)
+    for rank, text in rank_map.items():
+        _require_text(text, f"hardware.{field}.{rank}")
+    return set(rank_map)
+
+
 def _validate_hardware(hardware: Any) -> dict[str, Any]:
     if not isinstance(hardware, dict) or not hardware:
         raise ValueError("hardware must be a non-empty object")
     missing = _HARDWARE_FIELDS - set(hardware)
     if missing:
         raise ValueError(f"hardware fields differ: missing={sorted(missing)}")
-    _require_text(hardware["gpu_model"], "hardware.gpu_model")
     rank_sets = [
+        _validate_text_rank_map(hardware["gpu_models"], "gpu_models"),
         _validate_hca_map(hardware["gpu_to_hca"], "gpu_to_hca", allow_empty=False),
         _validate_hca_map(hardware["backend_hcas"], "backend_hcas", allow_empty=True),
         _validate_positive_rank_map(hardware["gpu_clocks_mhz"], "gpu_clocks_mhz"),
@@ -139,6 +146,19 @@ class AfdMetricsManifest:
     model_revision: str
     system: str
     hardware: Mapping[str, Any]
+
+    def validate_worker_ranks(self, total_workers: int) -> None:
+        if isinstance(total_workers, bool) or not isinstance(total_workers, int):
+            raise TypeError("total_workers must be an integer")
+        if total_workers < 1:
+            raise ValueError("total_workers must be positive")
+        actual = {int(rank) for rank in self.hardware["gpu_models"]}
+        expected = set(range(total_workers))
+        if actual != expected:
+            raise ValueError(
+                "hardware ranks do not match the AFD worker world: "
+                f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+            )
 
     @classmethod
     def load(cls, path: str | Path) -> AfdMetricsManifest:
