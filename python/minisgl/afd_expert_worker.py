@@ -21,7 +21,7 @@ from .afd_protocol import (
 from minisgl.core import Context, get_global_ctx, set_global_ctx
 from minisgl.engine.config import EngineConfig
 from minisgl.engine.engine import _init_tp_communication
-from minisgl.utils import nvtx_range
+from minisgl.utils import nvtx_label, nvtx_range
 
 from .cuda_graph_utils import capture_cuda_graph
 from .afd_support import AfdRuntimeConfig, log_line
@@ -594,9 +594,14 @@ class AfdExpertWorker(BaseAfdWorker):
                     continue
                 if not isinstance(cmd, AfdRunEGStepCmd):
                     raise RuntimeError(f"Unsupported EG command: {type(cmd).__name__}")
-                self._process_last_afd_eg(
-                    self._run_afd_eg_step(cmd.plan, sent_ns=cmd.sent_ns)
-                )
+                if self._ray_nsys_enabled:
+                    with nvtx_range(
+                        nvtx_label("AFD_EG_Step", step=cmd.plan.step_id, phase=cmd.plan.phase)
+                    ):
+                        current = self._run_afd_eg_step(cmd.plan, sent_ns=cmd.sent_ns)
+                else:
+                    current = self._run_afd_eg_step(cmd.plan, sent_ns=cmd.sent_ns)
+                self._process_last_afd_eg(current)
 
     def afd_overlap_loop(self) -> None:
         """Fixed two-step-ahead EG loop.
@@ -626,9 +631,14 @@ class AfdExpertWorker(BaseAfdWorker):
                     continue
                 if not isinstance(cmd, AfdRunEGStepCmd):
                     raise RuntimeError(f"Unsupported EG command: {type(cmd).__name__}")
-                pending.append(
-                    self._run_afd_eg_step(cmd.plan, sent_ns=cmd.sent_ns)
-                )
+                if self._ray_nsys_enabled:
+                    with nvtx_range(
+                        nvtx_label("AFD_EG_Step", step=cmd.plan.step_id, phase=cmd.plan.phase)
+                    ):
+                        current = self._run_afd_eg_step(cmd.plan, sent_ns=cmd.sent_ns)
+                else:
+                    current = self._run_afd_eg_step(cmd.plan, sent_ns=cmd.sent_ns)
+                pending.append(current)
                 retire()
 
     def _log_plan_recv(

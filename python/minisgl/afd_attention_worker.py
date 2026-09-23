@@ -869,9 +869,14 @@ class AfdAttentionWorker(BaseAfdWorker):
                     self.handle_profiler_cmd(cmd)
                     continue
                 if isinstance(cmd, AfdRunAGStepCmd):
-                    self._process_last_afd_ag(
-                        self._run_afd_ag_step(cmd.plan, sent_ns=cmd.sent_ns)
-                    )
+                    if self._ray_nsys_enabled:
+                        with nvtx_range(
+                            nvtx_label("AFD_AG_Step", step=cmd.plan.step_id, phase=cmd.plan.phase)
+                        ):
+                            current = self._run_afd_ag_step(cmd.plan, sent_ns=cmd.sent_ns)
+                    else:
+                        current = self._run_afd_ag_step(cmd.plan, sent_ns=cmd.sent_ns)
+                    self._process_last_afd_ag(current)
                     continue
                 raise RuntimeError(
                     f"Unsupported centralized attention command: {type(cmd).__name__}"
@@ -906,9 +911,14 @@ class AfdAttentionWorker(BaseAfdWorker):
                     self.handle_profiler_cmd(cmd)
                     continue
                 if isinstance(cmd, AfdRunAGStepCmd):
-                    pending_afd_ag.append(
-                        self._run_afd_ag_step(cmd.plan, sent_ns=cmd.sent_ns)
-                    )
+                    if self._ray_nsys_enabled:
+                        with nvtx_range(
+                            nvtx_label("AFD_AG_Step", step=cmd.plan.step_id, phase=cmd.plan.phase)
+                        ):
+                            current = self._run_afd_ag_step(cmd.plan, sent_ns=cmd.sent_ns)
+                    else:
+                        current = self._run_afd_ag_step(cmd.plan, sent_ns=cmd.sent_ns)
+                    pending_afd_ag.append(current)
                     retire_afd_ag()
                     continue
                 raise RuntimeError(
