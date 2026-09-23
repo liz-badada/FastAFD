@@ -45,6 +45,8 @@ class ServerArgs(SchedulerConfig):
     afd_max_running_req: int = 0
     afd_sample_json: str = ""
     afd_report_dir: str = ""
+    afd_metrics_output: str = ""
+    afd_metrics_manifest: str = ""
     afd_device_comm_num_sms: int = 1
     afd_disable_overlap: bool = False
     afd_num_mb: int = 1
@@ -616,6 +618,18 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
+        "--afd-metrics-output",
+        default=ServerArgs.afd_metrics_output,
+        help="Optional JSONL output for versioned AFD decode-step measurements.",
+    )
+
+    parser.add_argument(
+        "--afd-metrics-manifest",
+        default=ServerArgs.afd_metrics_manifest,
+        help="Run manifest required with --afd-metrics-output.",
+    )
+
+    parser.add_argument(
         "--afd-device-comm-num-sms",
         type=int,
         default=ServerArgs.afd_device_comm_num_sms,
@@ -694,6 +708,10 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         # deep_gemm -- the only backend the AFD EG path supports.
         if kwargs["afd_moe_runner_backend"] == "auto":
             kwargs["afd_moe_runner_backend"] = "deep_gemm"
+    if bool(kwargs["afd_metrics_output"]) != bool(kwargs["afd_metrics_manifest"]):
+        parser.error("--afd-metrics-output and --afd-metrics-manifest must be configured together")
+    if kwargs["afd_metrics_output"] and kwargs["mode"] != "afd-serve":
+        parser.error("--afd-metrics-output requires --mode afd-serve")
     if kwargs["cuda_graph_max_bs"] is None and not kwargs["afd_decode_graph_bs"]:
         cap = (
             int(kwargs["afd_max_running_req"])
