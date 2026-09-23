@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 import gc
-import os
 import sys
 import threading
 import time
 import traceback
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import ray
 import zmq
-from minisgl.afd_metrics import (
-    AfdMetricsManifest,
-    AfdMetricsWriter,
-    AfdStepMeasurement,
-)
+
 from minisgl.core import Batch, Req
 from minisgl.message import (
     AbortBackendMsg,
@@ -30,6 +26,19 @@ from minisgl.message import (
     DetokenizeMsg,
     ExitMsg,
     UserMsg,
+)
+from .afd_protocol import (
+    AfdModelPlan,
+    AfdCommand,
+    AfdReply,
+    AfdStopCmd,
+    AfdTopology,
+    AfdFlushStepCmd,
+    AfdAGStepReply,
+    AfdEGStepPlan,
+    AfdRunAGStepCmd,
+    AfdRunEGStepCmd,
+    build_afd_ag_plan,
 )
 from minisgl.scheduler.scheduler import (
     _prepare_user_msg,
@@ -46,31 +55,18 @@ from minisgl.utils import (
     shutdown_nvtx_cpu_trace,
 )
 
-from .afd_profiler import (
-    maybe_start_nsys_runtime_capture_for_step,
-    maybe_stop_nsys_runtime_capture_after_step,
-    stop_nsys_runtime_capture,
-)
-from .afd_protocol import (
-    AfdAGStepReply,
-    AfdCommand,
-    AfdEGStepPlan,
-    AfdFlushStepCmd,
-    AfdModelPlan,
-    AfdReply,
-    AfdRunAGStepCmd,
-    AfdRunEGStepCmd,
-    AfdStopCmd,
-    AfdTopology,
-    build_afd_ag_plan,
-)
-from .afd_scheduler import CentralizedAfdDpScheduler
 from .afd_support import (
     build_runtime_sizing,
     flush_log_lines,
     log_line,
     normalize_attention_backend_page_size,
 )
+from .afd_profiler import (
+    maybe_start_nsys_runtime_capture_for_step,
+    maybe_stop_nsys_runtime_capture_after_step,
+    stop_nsys_runtime_capture,
+)
+from .afd_scheduler import CentralizedAfdDpScheduler
 from .afd_worker_launcher import startup_afd_workers
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -116,17 +112,6 @@ class _AfdDpLaunchBatch:
     model_plan: AfdModelPlan
     batch: Batch
     is_dummy: bool
-
-
-@dataclass(frozen=True)
-class _AfdPendingMetric:
-    launch_ns: int
-    batch_size: int
-    padded_batch_size: int
-    total_kv_tokens: int
-    dispatch_bucket: int
-    num_microbatches: int
-    cuda_graph: bool
 
 
 _MAX_DRAIN_PER_SOCKET = 256
@@ -229,32 +214,6 @@ class AfdCoordinator:
                 "max_batched_tokens": self.max_batched_tokens,
             },
         )
-        self._metrics_writer: AfdMetricsWriter | None = None
-        self._pending_metrics: dict[int, _AfdPendingMetric] = {}
-        if server_args.afd_metrics_output:
-            manifest = AfdMetricsManifest.load(server_args.afd_metrics_manifest)
-            manifest.validate_worker_ranks(self._layout.total_workers)
-            runtime = {
-                "attention_backend": self.attention_backend,
-                "dtype": str(server_args.dtype).removeprefix("torch."),
-                "moe_a2a_backend": server_args.afd_moe_a2a_backend,
-                "moe_runner_backend": server_args.afd_moe_runner_backend,
-                "overlap": not server_args.afd_disable_overlap,
-                "page_size": self.page_size,
-                "decode_graph_bs": list(self.decode_graph_bs),
-                "topology": {
-                    "attn_dp": self.attn_dp_size,
-                    "attn_tp": self.attn_tp_size,
-                    "mlp_dp": self.mlp_dp_size,
-                    "mlp_tp": self.mlp_tp_size,
-                    "mlp_ep": int(server_args.afd_mlp_ep_size),
-                },
-            }
-            self._metrics_writer = AfdMetricsWriter(
-                server_args.afd_metrics_output,
-                manifest=manifest,
-                runtime=runtime,
-            )
 
     def _init_frontend_queues(self) -> None:
         server_args = self.server_args
@@ -637,65 +596,7 @@ class AfdCoordinator:
         trace_path = shutdown_nvtx_cpu_trace()
         if trace_path:
             log_line(self.log_path, f"[afd-coordinator] cpu_trace flushed path={trace_path}", flush=True)
-        if self._metrics_writer is not None:
-            self._metrics_writer.close()
         flush_log_lines(self.log_path)
-
-    def _prepare_decode_metric(
-        self,
-        *,
-        step_id: int,
-        dp_batches: list[_AfdDpLaunchBatch],
-        dispatch_bucket: int,
-        num_microbatches: int,
-        cuda_graph: bool,
-    ) -> _AfdPendingMetric | None:
-        if self._metrics_writer is None:
-            return None
-        real = [item for item in dp_batches if not item.is_dummy]
-        if not real or any(item.model_plan.phase != "decode" for item in real):
-            return None
-        if step_id in self._pending_metrics:
-            raise RuntimeError(f"duplicate pending AFD metrics step_id: {step_id}")
-        return _AfdPendingMetric(
-            launch_ns=0,
-            batch_size=sum(item.model_plan.size for item in real),
-            padded_batch_size=sum(item.model_plan.padded_size for item in dp_batches),
-            total_kv_tokens=sum(int(req.cached_len) for item in real for req in item.batch.reqs),
-            dispatch_bucket=int(dispatch_bucket),
-            num_microbatches=int(num_microbatches),
-            cuda_graph=bool(cuda_graph),
-        )
-
-    def _record_decode_launch(
-        self,
-        step_id: int,
-        pending: _AfdPendingMetric | None,
-        launch_ns: int | None,
-    ) -> None:
-        if pending is None:
-            return
-        if launch_ns is None:
-            raise RuntimeError(f"AFD metrics step {step_id} sent no worker command")
-        self._pending_metrics[int(step_id)] = replace(pending, launch_ns=int(launch_ns))
-
-    def _record_decode_completion(self, step_id: int, completion_ns: int) -> None:
-        pending = self._pending_metrics.pop(int(step_id), None)
-        writer = self._metrics_writer
-        if pending is None or writer is None:
-            return
-        writer.write_decode_step(
-            AfdStepMeasurement(
-                step_id=int(step_id),
-                batch_size=pending.batch_size,
-                padded_batch_size=pending.padded_batch_size,
-                total_kv_tokens=pending.total_kv_tokens,
-                dispatch_bucket=pending.dispatch_bucket,
-                num_microbatches=pending.num_microbatches,
-                cuda_graph=pending.cuda_graph,
-                latency_ms=(int(completion_ns) - pending.launch_ns) / 1_000_000.0,
-            )
-        )
 
     def _init_centralized_schedulers(self) -> None:
         if not self.attn_workers:
@@ -1125,14 +1026,6 @@ class AfdCoordinator:
         )
         use_graph_ns = time.perf_counter_ns() - use_graph_start_ns
         items: list[tuple[int, Batch, tuple[int, ...]]] = []
-        pending_metric = self._prepare_decode_metric(
-            step_id=step_id,
-            dp_batches=dp_batches,
-            dispatch_bucket=bucket,
-            num_microbatches=num_mb,
-            cuda_graph=use_decode_graph,
-        )
-        metric_launch_ns: int | None = None
         with nvtx_range(nvtx_label("AFD_Coordinator_LaunchAG", step=step_id, phase=phase)):
             ag_loop_start_ns = time.perf_counter_ns()
             for item in dp_batches:
@@ -1167,8 +1060,6 @@ class AfdCoordinator:
                 ranks = tuple(range(dp * attn_tp, (dp + 1) * attn_tp))
                 rank_ns += time.perf_counter_ns() - rank_start_ns
                 ag_send_start_ns = time.perf_counter_ns()
-                if pending_metric is not None and metric_launch_ns is None:
-                    metric_launch_ns = time.perf_counter_ns()
                 self._send_cmd_to_workers(ranks, AfdRunAGStepCmd(plan=ag_plan))
                 ag_send_ns += time.perf_counter_ns() - ag_send_start_ns
                 pending_free[dp] = ()
@@ -1197,7 +1088,6 @@ class AfdCoordinator:
             )
             eg_send_ns = time.perf_counter_ns() - eg_send_start_ns
             eg_loop_ns = time.perf_counter_ns() - eg_loop_start_ns
-        self._record_decode_launch(step_id, pending_metric, metric_launch_ns)
         if state_updates:
             with nvtx_range(
                 nvtx_label("AFD_Coordinator_PostLaunchState", step=step_id, phase=phase)
@@ -1440,7 +1330,6 @@ class AfdCoordinator:
         with nvtx_range(nvtx_label("AFD_Coordinator_CompleteCollect", step=step_id)):
             toks_by_dp = self._afd_collect_global(step_id, active_dps, attn_tp)
         collect_done_ns = time.perf_counter_ns()
-        self._record_decode_completion(int(step_id), collect_done_ns)
 
         freed_by_dp = {}
         filter_ms_sum = 0.0

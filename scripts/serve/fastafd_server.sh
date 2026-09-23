@@ -17,8 +17,6 @@ Options:
   --ray-nsys                     Enable Nsight Systems profiling for Ray-side AFD workers
   --ray-nsys-output-prefix PATH  Nsight Systems output prefix
   --afd-report-dir DIR           Optional directory for AFD worker/coordinator logs
-  --afd-metrics-output FILE      Optional AFD decode-step JSONL output
-  --afd-metrics-manifest FILE    Run manifest required with metrics output
   --afd-attn-dp-size N           Default: 1
   --afd-mlp-dp-size N            Default: 1
   --afd-attn-tp-size N           Default: 4
@@ -51,8 +49,6 @@ RAY_LOG_DIR=""
 RAY_NSYS=0
 RAY_NSYS_OUTPUT_PREFIX=""
 AFD_REPORT_DIR=""
-AFD_METRICS_OUTPUT=""
-AFD_METRICS_MANIFEST=""
 AFD_ATTN_DP_SIZE="1"
 AFD_MLP_DP_SIZE="1"
 AFD_ATTN_TP_SIZE="4"
@@ -85,8 +81,6 @@ while [[ $# -gt 0 ]]; do
     --ray-nsys) RAY_NSYS=1; shift ;;
     --ray-nsys-output-prefix) RAY_NSYS_OUTPUT_PREFIX="$2"; shift 2 ;;
     --afd-report-dir) AFD_REPORT_DIR="$2"; shift 2 ;;
-    --afd-metrics-output) AFD_METRICS_OUTPUT="$2"; shift 2 ;;
-    --afd-metrics-manifest) AFD_METRICS_MANIFEST="$2"; shift 2 ;;
     --afd-attn-dp-size) AFD_ATTN_DP_SIZE="$2"; shift 2 ;;
     --afd-mlp-dp-size) AFD_MLP_DP_SIZE="$2"; shift 2 ;;
     --afd-attn-tp-size) AFD_ATTN_TP_SIZE="$2"; shift 2 ;;
@@ -174,12 +168,6 @@ if [[ -n "$RAY_NSYS_OUTPUT_PREFIX" ]]; then
 fi
 if [[ -n "$AFD_REPORT_DIR" ]]; then
   cmd+=(--afd-report-dir "$AFD_REPORT_DIR")
-fi
-if [[ -n "$AFD_METRICS_OUTPUT" ]]; then
-  cmd+=(--afd-metrics-output "$AFD_METRICS_OUTPUT")
-fi
-if [[ -n "$AFD_METRICS_MANIFEST" ]]; then
-  cmd+=(--afd-metrics-manifest "$AFD_METRICS_MANIFEST")
 fi
 if [[ -n "$AFD_DECODE_GRAPH_BS" ]]; then
   cmd+=(--afd-decode-graph-bs "$AFD_DECODE_GRAPH_BS")
