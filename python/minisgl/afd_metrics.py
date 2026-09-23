@@ -60,27 +60,27 @@ def _require_rank_map(value: Any, field: str) -> dict[str, Any]:
     return value
 
 
-def _validate_hca_map(value: Any, field: str, *, allow_empty: bool) -> set[str]:
+def _validate_hca_map(value: Any, field: str) -> set[str]:
     rank_map = _require_rank_map(value, field)
     for rank, hcas in rank_map.items():
-        if not isinstance(hcas, list) or (not allow_empty and not hcas):
-            suffix = "a list" if allow_empty else "a non-empty list"
-            raise ValueError(f"hardware.{field}.{rank} must be {suffix}")
+        if not isinstance(hcas, list):
+            raise ValueError(f"hardware.{field}.{rank} must be a list")
         if any(not isinstance(hca, str) or not hca.strip() for hca in hcas):
             raise ValueError(f"hardware.{field}.{rank} must contain non-empty HCA names")
     return set(rank_map)
 
 
-def _validate_positive_rank_map(value: Any, field: str) -> set[str]:
+def _validate_positive_rank_map(value: Any, field: str, *, allow_zero: bool = False) -> set[str]:
     rank_map = _require_rank_map(value, field)
     for rank, number in rank_map.items():
         if (
             isinstance(number, bool)
             or not isinstance(number, (int, float))
             or not math.isfinite(number)
-            or number <= 0
+            or (number < 0 if allow_zero else number <= 0)
         ):
-            raise ValueError(f"hardware.{field}.{rank} must be finite and positive")
+            suffix = "non-negative" if allow_zero else "positive"
+            raise ValueError(f"hardware.{field}.{rank} must be finite and {suffix}")
     return set(rank_map)
 
 
@@ -99,12 +99,13 @@ def _validate_hardware(hardware: Any) -> dict[str, Any]:
         raise ValueError(f"hardware fields differ: missing={sorted(missing)}")
     rank_sets = [
         _validate_text_rank_map(hardware["gpu_models"], "gpu_models"),
-        _validate_hca_map(hardware["gpu_to_hca"], "gpu_to_hca", allow_empty=False),
-        _validate_hca_map(hardware["backend_hcas"], "backend_hcas", allow_empty=True),
+        _validate_hca_map(hardware["gpu_to_hca"], "gpu_to_hca"),
+        _validate_hca_map(hardware["backend_hcas"], "backend_hcas"),
         _validate_positive_rank_map(hardware["gpu_clocks_mhz"], "gpu_clocks_mhz"),
         _validate_positive_rank_map(
             hardware["per_rank_bandwidth_ceiling_gbps"],
             "per_rank_bandwidth_ceiling_gbps",
+            allow_zero=True,
         ),
     ]
     if any(ranks != rank_sets[0] for ranks in rank_sets[1:]):
@@ -132,6 +133,13 @@ def _validate_hardware(hardware: Any) -> dict[str, Any]:
         raise ValueError(
             f"hardware.nic_counter_deltas is missing selected HCAs: {sorted(missing_counters)}"
         )
+    for rank, hcas in hardware["backend_hcas"].items():
+        ceiling = hardware["per_rank_bandwidth_ceiling_gbps"][rank]
+        if bool(hcas) != (ceiling > 0):
+            raise ValueError(
+                "hardware.per_rank_bandwidth_ceiling_gbps must be positive exactly "
+                "for ranks with selected HCAs"
+            )
     try:
         json.dumps(hardware, allow_nan=False)
     except (TypeError, ValueError) as exc:

@@ -83,7 +83,7 @@ def test_manifest_rejects_duplicate_json_field(tmp_path):
             "rx_bytes and tx_bytes",
         ),
         ("nic_counter_deltas", {}, "missing selected HCAs"),
-        ("per_rank_bandwidth_ceiling_gbps", {"0": 0}, "finite and positive"),
+        ("per_rank_bandwidth_ceiling_gbps", {"0": 0}, "selected HCAs"),
     ],
 )
 def test_manifest_rejects_incomplete_hardware(tmp_path, field, value, match):
@@ -99,6 +99,18 @@ def test_manifest_rejects_worker_rank_mismatch(tmp_path):
 
     with pytest.raises(ValueError, match=r"missing=\[1\]"):
         manifest.validate_worker_ranks(2)
+
+
+def test_manifest_accepts_no_nic_path(tmp_path):
+    payload = _manifest_payload()
+    payload["hardware"]["gpu_to_hca"] = {"0": []}
+    payload["hardware"]["backend_hcas"] = {"0": []}
+    payload["hardware"]["nic_counter_deltas"] = {}
+    payload["hardware"]["per_rank_bandwidth_ceiling_gbps"] = {"0": 0}
+
+    manifest = AfdMetricsManifest.load(_write_manifest(tmp_path, payload))
+
+    assert manifest.hardware["backend_hcas"]["0"] == []
 
 
 def test_writer_emits_run_and_decode_records(tmp_path):
